@@ -1,0 +1,57 @@
+From b411a4fa3214cad97210265cd5eedcd2fe45b8a0 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:14:53 -0700
+Subject: [PATCH] Remove unneeded helper function for binding IPv4 addresses
+
+---
+ af_name.c |   21 ++++++++-------------
+ 1 files changed, 8 insertions(+), 13 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 40182bf..77392b0 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -159,17 +159,6 @@ out:
+ 	return 0;
+ }
+ 
+-static int name_bind_ipv4(struct socket *sock, const __be32 *addr, __be16 port)
+-{
+-	struct sockaddr_in sin;
+-
+-	memset(&sin, 0, sizeof(sin));
+-	if (addr)
+-		memcpy(&sin.sin_addr.s_addr, addr, sizeof(*addr));
+-	sin.sin_port = port;
+-	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
+-}
+-
+ /* Stolen from net/ipv6/ipv6_sockglue.c */
+ static
+ struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
+@@ -716,14 +705,20 @@ static int name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn,
+ 	 * listen().)
+ 	 */
+ 	if (name->sname.sname_port || v4addr) {
++		struct sockaddr_in sin;
++
+ 		if (!name->ipv4_sock) {
+ 			err = name_create_v4_sock(SOCK_STREAM, 0,
+ 						  &name->ipv4_sock, name);
+ 			if (err)
+ 				goto out;
+ 		}
+-		err = name_bind_ipv4(name->ipv4_sock, v4addr,
+-				     name->sname.sname_port);
++		memset(&sin, 0, sizeof(sin));
++		if (v4addr)
++			memcpy(&sin.sin_addr.s_addr, &v4addr, sizeof(v4addr));
++		sin.sin_port = name->sname.sname_port;
++		err = kernel_bind(name->ipv4_sock, (struct sockaddr *)&sin,
++				  sizeof(sin));
+ 		if (err)
+ 			goto out;
+ 	}
+-- 
+1.6.0.4
+

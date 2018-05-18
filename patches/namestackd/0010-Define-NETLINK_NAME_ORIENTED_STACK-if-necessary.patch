@@ -1,0 +1,27 @@
+From 640bc72b9badae7ce6ee68e196b44ce483b833ac Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:32:39 -0700
+Subject: [PATCH 10/21] Define NETLINK_NAME_ORIENTED_STACK if necessary
+
+---
+ daemon.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index 6b4837d..0e59c5e 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -15,6 +15,10 @@
+ #include "dns.h"
+ #include "namestacknl.h"
+ 
++#ifndef NETLINK_NAME_ORIENTED_STACK
++#define NETLINK_NAME_ORIENTED_STACK 20
++#endif
++
+ #define MAX_PAYLOAD 1024  /* maximum payload size*/
+ 
+ /* Definitions thare are ordinarily in <arpa/nameser.h>
+-- 
+1.6.3.2
+

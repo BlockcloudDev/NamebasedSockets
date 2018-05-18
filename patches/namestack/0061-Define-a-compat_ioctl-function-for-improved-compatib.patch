@@ -1,0 +1,48 @@
+From 95f5cc92cf681b2813022d241d6596e36d85740b Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:14:29 -0700
+Subject: [PATCH] Define a compat_ioctl function for improved compatibility with different kernel versions
+
+---
+ af_name.c |   11 +++++++++--
+ 1 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 8e2287c..72fa508 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -1744,6 +1744,13 @@ static int name_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
+ 					    flags);
+ }
+ 
++#ifdef CONFIG_COMPAT
++static int name_compat_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
++{
++	return -ENOIOCTLCMD;
++}
++#endif
++
+ static const struct proto_ops name_stream_ops = {
+ 	.family = PF_NAME,
+ 	.owner = THIS_MODULE,
+@@ -1756,7 +1763,7 @@ static const struct proto_ops name_stream_ops = {
+ 	.poll = sock_no_poll,
+ 	.ioctl = sock_no_ioctl,
+ #ifdef CONFIG_COMPAT
+-	.compat_ioctl = sock_no_compat_ioctl,
++	.compat_ioctl = name_compat_ioctl,
+ #endif
+ 	.listen = name_stream_listen,
+ 	.shutdown = sock_no_shutdown,
+@@ -1830,7 +1837,7 @@ static const struct proto_ops name_dgram_ops = {
+ 	.poll = sock_no_poll,
+ 	.ioctl = sock_no_ioctl,
+ #ifdef CONFIG_COMPAT
+-	.compat_ioctl = sock_no_compat_ioctl,
++	.compat_ioctl = name_compat_ioctl,
+ #endif
+ 	.listen = sock_no_listen,
+ 	.shutdown = sock_no_shutdown,
+-- 
+1.6.0.4
+

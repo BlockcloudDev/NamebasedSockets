@@ -1,0 +1,24 @@
+From d257db30cbf600e8f681534dd49b73dc742a1749 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:32:00 -0700
+Subject: [PATCH 08/21] Include pthread.h
+
+---
+ daemon.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index 9a52b2a..cd09362 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -7,6 +7,7 @@
+ #include <sys/socket.h>
+ #include <linux/netlink.h>
+ #include <errno.h>
++#include <pthread.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-- 
+1.6.3.2
+

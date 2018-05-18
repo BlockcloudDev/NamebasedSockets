@@ -1,0 +1,25 @@
+From 16cb0aab9702bbd6497fcdba064bb837079f7bf7 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:33:51 -0700
+Subject: [PATCH 14/21] Add dns.c to android build
+
+---
+ Android.mk |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/Android.mk b/Android.mk
+index 298c4ec..de13223 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -3,7 +3,7 @@ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+ LOCAL_MODULE := namestackd
+-LOCAL_SRC_FILES := daemon.c NameStackDaemon.cpp
++LOCAL_SRC_FILES := daemon.c dns.c NameStackDaemon.cpp
+ LOCAL_CPP_FLAGS := -DANDROID
+ 
+ include $(BUILD_SHARED_LIBRARY)
+-- 
+1.6.3.2
+

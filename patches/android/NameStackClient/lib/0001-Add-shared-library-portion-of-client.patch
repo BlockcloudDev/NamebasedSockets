@@ -1,0 +1,252 @@
+From c6d2e231f20a495767f44be0b485b3c07bb59c58 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Fri, 18 Sep 2009 13:36:09 -0700
+Subject: [PATCH] Add shared library portion of client
+
+---
+ Android.mk     |   10 +++
+ NameSocket.cpp |  215 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 225 insertions(+), 0 deletions(-)
+ create mode 100644 Android.mk
+ create mode 100644 NameSocket.cpp
+
+diff --git a/Android.mk b/Android.mk
+new file mode 100644
+index 0000000..079b463
+--- /dev/null
++++ b/Android.mk
+@@ -0,0 +1,10 @@
++LOCAL_PATH := $(call my-dir)
++
++include $(CLEAR_VARS)
++
++LOCAL_MODULE := NameStackClient
++LOCAL_SRC_FILES := NameSocket.cpp
++LOCAL_CPP_FLAGS := -DANDROID -I$(KERNEL_DIR)/include
++LOCAL_LDFLAGS := -L$(SYSROOT)/usr/lib -llog
++
++include $(BUILD_SHARED_LIBRARY)
+diff --git a/NameSocket.cpp b/NameSocket.cpp
+new file mode 100644
+index 0000000..f997440
+--- /dev/null
++++ b/NameSocket.cpp
+@@ -0,0 +1,215 @@
++#include <arpa/inet.h>
++#include <sys/socket.h>
++#include <linux/socket.h>
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <android/log.h>
++#include <jni.h>
++
++/* Warning: This should be included via:
++#include <linux/inname.h>
++ * instead, but I haven't figured out how to include headers from the kernel
++ * I'm building against (which differs between the emulator and the phone) yet.
++ * For now I'm just defining it directly.
++ */
++/* According to RFC1034, the maximum number of octets of a transmitted name is
++ * 255.  Assuming at least one preceding length octet and one terminating
++ * length octet of 0, this implies the maximum text length of domain name is
++ * 253 bytes, or 254 bytes with a NULL terminator.
++ */
++struct name_addr {
++    char name[254];
++};
++
++struct sockaddr_name {
++    unsigned short int sname_family; /* AF_NAME */
++    __be16             sname_port;   /* Transport layer port # */
++    struct name_addr   sname_addr;
++};
++
++/* Warning: this is linux kernel version specific.  I try to include the proper
++ * kernel header through the include of <linux/socket.h> and through changing
++ * my LOCAL_CPP_FLAGS in Android.mk, but of course the header being included is
++ * the bionic version rather than the one I'm trying to get to.
++ * This value of AF_NAME is appropriate to the 2.6.25 kernel, from which the
++ * msm kernel is built.
++ */
++#ifndef AF_NAME
++#define AF_NAME 34
++#endif
++
++#define ANDROID_LOG_TAG "namestack client"
++#define ANDROID_LOG(l, ...) __android_log_print((l), ANDROID_LOG_TAG, __VA_ARGS__)
++
++#define LOGV(x, ...) ANDROID_LOG(ANDROID_LOG_VERBOSE, x, __VA_ARGS__)
++#define LOGD(x, ...) ANDROID_LOG(ANDROID_LOG_DEBUG, x, __VA_ARGS__)
++#define LOGI(x, ...) ANDROID_LOG(ANDROID_LOG_INFO, x, __VA_ARGS__)
++#define LOGW(x, ...) ANDROID_LOG(ANDROID_LOG_WARN, x, __VA_ARGS__)
++#define LOGE(x, ...) ANDROID_LOG(ANDROID_LOG_ERROR, x, __VA_ARGS__)
++
++jint
++Java_com_ericsson_namestack_NameSocket_socket(JNIEnv *env, jobject obj)
++{
++    int fd = socket(AF_NAME, SOCK_STREAM, 0);
++
++    if (fd == -1) {
++        jclass e = env->FindClass("java/net/SocketException");
++        env->ThrowNew(e, strerror(errno));
++    }
++    return fd;
++}
++
++void
++Java_com_ericsson_namestack_NameSocket_internalclose(JNIEnv *env, jobject obj,
++                                                     jint fd)
++{
++    if (close(fd) == -1) {
++        LOGW("close: %s (%d)", strerror(errno), errno);
++        jclass e = env->FindClass("java/io/IOException");
++        env->ThrowNew(e, strerror(errno));
++    }
++}
++
++void
++Java_com_ericsson_namestack_NameSocket_internalbind(JNIEnv *env, jobject obj,
++                                                    jint fd, jstring source,
++                                                    jint port)
++{
++    struct sockaddr_name addr;
++    const char *sourceStr = env->GetStringUTFChars(source, 0);
++    int ret;
++
++    addr.sname_family = AF_NAME;
++    if (strlen(sourceStr) >= sizeof(addr.sname_addr.name)) {
++        LOGW("name %s too long\n", sourceStr);
++        jclass e = env->FindClass("java/net/BindException");
++        env->ThrowNew(e, "name too long");
++    }
++    strcpy(addr.sname_addr.name, sourceStr);
++    env->ReleaseStringUTFChars(source, sourceStr);
++    if (port < 0 || port > 65535) {
++        LOGW("port %d out of range\n", port);
++        jclass e = env->FindClass("java/net/BindException");
++        env->ThrowNew(e, "port out of range");
++    }
++    addr.sname_port = htons(port);
++    ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
++    if (ret == -1) {
++        LOGW("bind: %s (%d)", strerror(errno), errno);
++        jclass e = env->FindClass("java/net/BindException");
++        env->ThrowNew(e, strerror(errno));
++    }
++}
++
++void
++Java_com_ericsson_namestack_NameSocket_internalconnect(JNIEnv *env,
++                                                       jobject obj,
++                                                       jint fd, jstring dest,
++                                                       jint port)
++{
++    struct sockaddr_name addr;
++    const char *destStr = env->GetStringUTFChars(dest, 0);
++    int ret;
++
++    addr.sname_family = AF_NAME;
++    if (strlen(destStr) >= sizeof(addr.sname_addr.name)) {
++        LOGW("name %s too long\n", destStr);
++        jclass e = env->FindClass("java/net/ConnectException");
++        env->ThrowNew(e, "name too long");
++    }
++    strcpy(addr.sname_addr.name, destStr);
++    env->ReleaseStringUTFChars(dest, destStr);
++    if (port < 0 || port > 65535) {
++        LOGW("port %d out of range\n", port);
++        jclass e = env->FindClass("java/net/ConnectException");
++        env->ThrowNew(e, "port out of range");
++    }
++    addr.sname_port = htons(port);
++    ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
++    if (ret == -1) {
++        LOGW("connect: %s (%d)\n", strerror(errno), errno);
++        jclass e = env->FindClass("java/net/ConnectException");
++        env->ThrowNew(e, strerror(errno));
++    }
++}
++
++void
++Java_com_ericsson_namestack_NameSocket_internalsend(JNIEnv *env, jobject obj,
++                                                    jint fd, jstring msg)
++{
++    const char *str = env->GetStringUTFChars(msg, 0);
++    int ret;
++
++    LOGV("sending %s", str);
++    ret = write(fd, str, strlen(str) + 1);
++    env->ReleaseStringUTFChars(msg, str);
++    if (ret == -1) {
++        LOGW("write: %s (%d)\n", strerror(errno), errno);
++        jclass e = env->FindClass("java/io/IOException");
++        env->ThrowNew(e, strerror(errno));
++    }
++}
++
++jstring
++Java_com_ericsson_namestack_NameSocket_internalrecv(JNIEnv *env, jobject obj,
++                                                    jint fd)
++{
++    char buf[100];
++    int ret;
++
++    ret = recv(fd, buf, sizeof(buf) - 1, 0);
++    if (ret == -1) {
++        LOGW("recv: %s (%d)\n", strerror(errno), errno);
++        jclass e = env->FindClass("java/io/IOException");
++        env->ThrowNew(e, strerror(errno));
++    }
++    buf[ret] = 0;
++    return env->NewStringUTF(buf);
++}
++
++static int jniRegisterNativeMethods(JNIEnv *env, const char *className,
++    const JNINativeMethod *gMethods, int numMethods)
++{
++    jclass clazz;
++
++    LOGV("Registering %s natives\n", className);
++    clazz = env->FindClass(className);
++    if (clazz == NULL) {
++        LOGE("Native registration unable to find class '%s'\n", className);
++        return -1;
++    }
++    if (env->RegisterNatives(clazz, gMethods, numMethods) < 0) {
++        LOGE("RegisterNatives failed for '%s'\n", className);
++        return -1;
++    }
++    return 0;
++}
++
++static JNINativeMethod sMethods[] = {
++     /* name, signature, funcPtr */
++    { "socket", "()I", (void*)Java_com_ericsson_namestack_NameSocket_socket },
++    { "internalclose", "(I)V",
++      (void*)Java_com_ericsson_namestack_NameSocket_internalclose },
++    { "internalbind", "(ILjava/lang/String;I)V",
++      (void*)Java_com_ericsson_namestack_NameSocket_internalbind },
++    { "internalconnect", "(ILjava/lang/String;I)V",
++      (void*)Java_com_ericsson_namestack_NameSocket_internalconnect },
++    { "internalsend", "(ILjava/lang/String;)V",
++      (void*)Java_com_ericsson_namestack_NameSocket_internalsend },
++    { "internalrecv", "(I)Ljava/lang/String;",
++      (void*)Java_com_ericsson_namestack_NameSocket_internalrecv },
++};
++
++extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
++{
++    JNIEnv* env = NULL;
++
++    if (vm->GetEnv((void**)&env, JNI_VERSION_1_4) != JNI_OK)
++        return -1;
++
++    jniRegisterNativeMethods(env, "com/ericsson/namestack/NameSocket",
++                             sMethods, sizeof(sMethods) / sizeof(sMethods[0]));
++    return JNI_VERSION_1_4;
++}
+-- 
+1.6.3.2
+

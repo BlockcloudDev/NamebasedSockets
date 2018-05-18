@@ -1,0 +1,114 @@
+From be5ee9c972ac9cec22540f3b9007da5454ffda2f Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:48:46 -0700
+Subject: [PATCH 34/67] Bind transport sockets once a name is qualified
+
+---
+ net/namestack/af_name.c |   66 +++++++++++++++++++++++++++++++++++++++++-----
+ 1 files changed, 58 insertions(+), 8 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 88ea132..8d582a9 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -103,12 +103,45 @@ out:
+ 	return 0;
+ }
+ 
+-static void name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn)
++static int name_bind_ipv4(struct socket *sock, __be16 port, int local)
+ {
+-	/* FIXME: need attempt to bind to the specified port on each
+-	 * transport socket.
+-	 */
++	struct sockaddr_in sin;
++
++	memset(&sin, 0, sizeof(sin));
++	if (local)
++		sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++	sin.sin_port = port;
++	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
++}
++
++static int name_bind_ipv6(struct socket *sock, const char *fqdn, __be16 port,
++			  int local)
++{
++	struct sockaddr_in6 sin;
++
++	memset(&sin, 0, sizeof(sin));
++	if (local) {
++		__u8 loopback[16] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 };
++
++		memcpy(&sin.sin6_addr, &loopback, sizeof(sin.sin6_addr));
++	}
++	sin.sin6_port = port;
++	/* FIXME: need to tie the fqdn to the socket somehow, but how? */
++	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
++}
++
++static int name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn,
++			     int local)
++{
++	int err;
++
+ 	printk(KERN_INFO "bound to %s\n", fqdn);
++	err = name_bind_ipv6(name->ipv6_sock, fqdn, name->sname.sname_port,
++			     local);
++	if (!err)
++		err = name_bind_ipv4(name->ipv4_sock, name->sname.sname_port,
++				     local);
++	return err;
+ }
+ 
+ static void name_register_cb(int result, const char *bound_name, void *data)
+@@ -117,10 +150,10 @@ static void name_register_cb(int result, const char *bound_name, void *data)
+ 	struct sock *sk = sock->sk;
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+ 
++	if (!result)
++		result = name_bind_to_fqdn(name, bound_name, 0);
+ 	sk->sk_state &= ~NAMEF_BINDING;
+ 	name->async_error = -result;
+-	if (!result)
+-		name_bind_to_fqdn(name, bound_name);
+ }
+ 
+ static int name_register(struct socket *sock, const char *fully_qualified_name)
+@@ -128,6 +161,7 @@ static int name_register(struct socket *sock, const char *fully_qualified_name)
+ 	struct sock *sk = sock->sk;
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+ 	int err;
++	const char *p;
+ 
+ 	printk(KERN_INFO "name qualified as %s\n", fully_qualified_name);
+ 	strcpy(name->sname.sname_addr.name, fully_qualified_name);
+@@ -135,8 +169,24 @@ static int name_register(struct socket *sock, const char *fully_qualified_name)
+ 	if (err)
+ 		goto out;
+ 	/* FIXME: need to select addresses to register for name */
+-	err = name_send_registration(fully_qualified_name,
+-				     name_register_cb, sock);
++	//assert(strlen(fully_qualified_name) > 1);
++	p = fully_qualified_name + strlen(fully_qualified_name) - 1;
++	//assert(*p == '.');
++	for (p = p - 1; *p != '.' && p >= fully_qualified_name; p--)
++		;
++	if (p == fully_qualified_name) {
++		/* FIXME: name doesn't exist in any domain.  Do I need to make
++		 * a canonical name out of it?
++		 */
++		name_cache_delete(fully_qualified_name);
++		err = -EINVAL;
++		goto out;
++	}
++	if (!strcmp(p + 1, "localhost."))
++		err = name_bind_to_fqdn(name, fully_qualified_name, 1);
++	else
++		err = name_send_registration(fully_qualified_name,
++					     name_register_cb, sock);
+ 	if (err)
+ 		name_cache_delete(fully_qualified_name);
+ 
+-- 
+1.6.3.2
+

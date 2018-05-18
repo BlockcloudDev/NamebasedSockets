@@ -1,0 +1,24 @@
+From 20e8c5acd0bbd4e8bd1c516f427fbbd5c6afa349 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:35:17 -0700
+Subject: [PATCH 20/21] Log socket creation error
+
+---
+ daemon.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index 8ef102a..59ece25 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -765,5 +765,7 @@ int run_daemon(void)
+ 		/* Close Netlink Socket */
+ 		close(sock_fd);
+ 	}
++        else
++		LOGE("socket failed: %s (%d)\n", strerror(errno), errno);
+ 	return 0;
+ }
+-- 
+1.6.3.2
+

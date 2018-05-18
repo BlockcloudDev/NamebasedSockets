@@ -1,0 +1,170 @@
+From 4b34db101451397cfb1a394868add6da94a0e85c Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:14:09 -0700
+Subject: [PATCH 59/67] Support binding to canonical names
+
+---
+ net/namestack/af_name.c |  136 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 136 insertions(+), 0 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 40d4c57..919b875 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -1,3 +1,4 @@
++#include <linux/ctype.h>
+ #include <linux/types.h>
+ #include <linux/socket.h>
+ #include <linux/in.h>
+@@ -765,6 +766,125 @@ static void name_register_cb(int result, const char *bound_name, void *data)
+ 	name->async_error = -result;
+ }
+ 
++/* Parses the canonical name into the IPv4 address it represents, in host
++ * byte order.
++ * Returns -EINVAL if the name is not an IPv4 address, and 0 otherwise.
++ */
++static int name_parse_canonical_v4(const char *name, unsigned int *addr)
++{
++	const char *p;
++	int i, r;
++	unsigned int a1, a2, a3, a4;
++
++	p = name_find_v4_canonical_suffix(name);
++	if (!p)
++		return -EINVAL;
++	/* Skip past the 4 octets of the IP address */
++	for (i = 0; i < 4; i++) {
++		for (--p; p > name && isdigit(*p); --p)
++			;
++		if (p > name && *p != '.')
++			return -EINVAL;
++	}
++	if (p > name)
++		++p;
++	r = sscanf(p, "%u.%u.%u.%u.", &a4, &a3, &a2, &a1);
++	if (r != 4)
++		return -EINVAL;
++	if (a1 > 255 || a2 > 255 || a3 > 255 || a4 > 255)
++		return -EINVAL;
++	*addr = (a4 << 24) | (a3 << 16) | (a2 << 8) | a1;
++	return 0;
++}
++
++static int name_parse_v6_label(const char *label, uint8_t addr[16],
++			       int *bytesParsed, const char **endPtr)
++{
++	const char *p = label;
++	uint8_t *dst = addr;
++	int nibbleCount = 0;
++
++	memset(addr, 0, 16 * sizeof(uint8_t));
++	*bytesParsed = 0;
++	if (*(p++) != '\\') return -EINVAL;
++	if (*(p++) != '[') return -EINVAL;
++	/* Only hexadecimal labels are supported */
++	if (*(p++) != 'x') return -EINVAL;
++	for (; isalnum(*p); p++)
++	{
++		uint8_t nibble;
++
++		if (isdigit(*p))
++			nibble = *p - '0';
++		else if (*p >= 'a' && *p <= 'f')
++			nibble = 10 + *p - 'a';
++		else if (*p >= 'A' && *p <= 'F')
++			nibble = 10 + *p - 'A';
++		else
++			return -EINVAL;
++		if (nibbleCount & 1)
++			*(dst++) |= nibble;
++		else
++			*dst = nibble << 4;
++		nibbleCount++;
++	}
++	if (*p == ']')
++	{
++		*bytesParsed = nibbleCount >> 1;
++		*endPtr = p + 1;
++		return 0;
++	}
++	else if (*p == '/')
++	{
++		int bitCount = 0;
++
++		for (++p; isdigit(*p); ++p) {
++			bitCount *= 10;
++			bitCount += *p - '0';
++		}
++		if (*p != ']')
++			return -EINVAL;
++		if (bitCount >> 3 != nibbleCount >> 1)
++			return -EINVAL;
++		*bytesParsed = bitCount >> 3;
++		*endPtr = p + 1;
++		return 0;
++	}
++	else
++		return -EINVAL;
++}
++
++/* Parses the canonical name into the IPv6 address it represents, in host
++ * byte order.
++ * Returns -EINVAL if the name is not an IPv6 address, and 0 otherwise.
++ */
++static int name_parse_canonical_v6(const char *name, struct in6_addr *v6addr)
++{
++	const char *next, *p;
++	uint8_t labelAddr[16];
++	int r, bytesParsed;
++
++	p = name_find_v6_canonical_suffix(name);
++	if (!p)
++		return -EINVAL;
++	for (--p; p > name && *p != '.'; --p)
++		;
++	if (*p == '.')
++		++p;
++	/* This only parses a single label, because the canonical form of an
++	 * address requires the fewest labels (1) possible to specify the
++	 * address (see RFC2673.)
++	 */
++	r = name_parse_v6_label(p, labelAddr, &bytesParsed, &next);
++	if (!r) {
++		if (bytesParsed != sizeof(labelAddr))
++			r = -EINVAL;
++		else
++			memcpy(v6addr->s6_addr, labelAddr, sizeof(labelAddr));
++	}
++	return r;
++}
++
+ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 			__be16 port)
+ {
+@@ -794,6 +914,22 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 		err = name_bind_to_fqdn(name, fully_qualified_name, &v4loopback,
+ 					&v6loopback);
+ 	}
++	else if (name_find_v4_canonical_suffix(fully_qualified_name) != NULL) {
++		__be32 v4addr;
++
++		err = name_parse_canonical_v4(fully_qualified_name, &v4addr);
++		if (!err)
++			err = name_bind_to_fqdn(name, fully_qualified_name,
++						&v4addr, NULL);
++	}
++	else if (name_find_v6_canonical_suffix(fully_qualified_name) != NULL) {
++		struct in6_addr v6addr;
++
++		err = name_parse_canonical_v6(fully_qualified_name, &v6addr);
++		if (!err)
++			err = name_bind_to_fqdn(name, fully_qualified_name,
++						NULL, &v6addr);
++	}
+ 	else {
+ 		struct in6_addr *v6_addresses;
+ 		__be32 *v4_addresses;
+-- 
+1.6.3.2
+

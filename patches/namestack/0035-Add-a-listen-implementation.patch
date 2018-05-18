@@ -1,0 +1,54 @@
+From a5f6ed71e3ef3b9b02dc726152115a935638d8a1 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:48:55 -0700
+Subject: [PATCH] Add a listen implementation
+
+---
+ af_name.c |   24 +++++++++++++++++++++++-
+ 1 files changed, 23 insertions(+), 1 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 8d582a9..34c5434 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -590,6 +590,28 @@ out:
+ 	return err;
+ }
+ 
++static int name_stream_listen(struct socket *sock, int backlog)
++{
++	struct sock *sk = sock->sk;
++	struct name_stream_sock *name = name_stream_sk(sk);
++	int err = -EINVAL;
++
++	lock_sock(sk);
++	if (sock->state != SS_UNCONNECTED)
++		goto out;
++
++	/* FIXME: what does it mean to listen on more than one socket?  And
++	 * what does backlog mean?
++	 */
++	err = kernel_listen(name->ipv6_sock, backlog);
++	if (!err)
++		err = kernel_listen(name->ipv4_sock, backlog);
++
++out:
++	release_sock(sk);
++	return err;
++}
++
+ static const struct proto_ops name_stream_ops = {
+ 	.family = PF_NAME,
+ 	.owner = THIS_MODULE,
+@@ -604,7 +626,7 @@ static const struct proto_ops name_stream_ops = {
+ #ifdef CONFIG_COMPAT
+ 	.compat_ioctl = sock_no_compat_ioctl,
+ #endif
+-	.listen = sock_no_listen,
++	.listen = name_stream_listen,
+ 	.shutdown = sock_no_shutdown,
+ 	.setsockopt = sock_no_setsockopt,
+ 	.getsockopt = sock_no_getsockopt,
+-- 
+1.6.0.4
+

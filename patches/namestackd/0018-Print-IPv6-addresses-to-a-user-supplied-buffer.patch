@@ -1,0 +1,96 @@
+From 738b949c257152405a8a43d23249d9649b978637 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:34:51 -0700
+Subject: [PATCH 18/21] Print IPv6 addresses to a user-supplied buffer
+
+---
+ daemon.c |   31 ++++++++++++++++++++++++-------
+ 1 files changed, 24 insertions(+), 7 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index 0419b4a..4ab4dca 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -79,8 +79,11 @@ static void print_a(const u_char *ptr, uint16_t rdlength,
+ #define s6_addr16   __u6_addr.__u6_addr16
+ #endif
+ 
++/* Prints the address in rdata to buf, which must be at least 46 bytes in
++ * size.
++ */
+ static void print_aaaa(const u_char *ptr, uint16_t rdlength,
+- const u_char *start, uint16_t len)
++ const u_char *start, uint16_t len, char *buf)
+ {
+     if (rdlength != sizeof(struct in6_addr))
+         fprintf(stderr, "address record has invalid length %d\n", rdlength);
+@@ -88,6 +91,7 @@ static void print_aaaa(const u_char *ptr, uint16_t rdlength,
+          fprintf(stderr, "address record overflows buffer\n");
+     else
+     {
++        char *p = buf;
+         struct in6_addr *addr = (struct in6_addr *)ptr;
+         int i, in_zero = 0;
+ 
+@@ -95,19 +99,24 @@ static void print_aaaa(const u_char *ptr, uint16_t rdlength,
+         {
+             if (!addr->s6_addr16[i])
+             {
++                if (i == 0)
++                    *p++ = ':';
+                 if (!in_zero)
+                 {
+-                    printf(":");
++                    *p++ = ':';
+                     in_zero = 1;
+                 }
+             }
+             else
+             {
+-                printf("%x:", ntohs(addr->s6_addr16[i]));
++                int n;
++
++                sprintf(p, "%x:%n", ntohs(addr->s6_addr16[i]), &n);
++                p += n;
+                 in_zero = 0;
+             }
+         }
+-        printf("%x\n", ntohs(addr->s6_addr16[7]));
++        sprintf(p, "%x\n", ntohs(addr->s6_addr16[7]));
+     }
+ }
+ 
+@@ -134,8 +143,10 @@ static void *query_thread(void *arg)
+ 						      &rdlength, &rdata);
+ 		if (found_response)
+ 		{
+-			printf("found a valid IPv6 address\n");
+-			print_aaaa(rdata, rdlength, buf, len);
++			char addrbuf[46];
++
++			print_aaaa(rdata, rdlength, buf, len, addrbuf);
++			printf("found a valid IPv6 address %s\n", addrbuf);
+ 		}
+ 	}
+ 	if (!found_response)
+@@ -361,10 +372,16 @@ static void *register_thread(void *arg)
+ 	printf("registering %s (seq %d)\n", data->name, data->seq);
+ 	printf("%d IPv6 addresses:\n", data->num_v6_addresses);
+ 	for (i = 0; i < data->num_v6_addresses; i++)
++	{
++		char addrbuf[46];
++
+ 		print_aaaa((const u_char *)&data->v6_addresses[i],
+ 			   sizeof(data->v6_addresses[i]),
+ 			   (const u_char *)data->v6_addresses,
+-			   data->num_v6_addresses * sizeof(data->v6_addresses[i]));
++			   data->num_v6_addresses * sizeof(data->v6_addresses[i]),
++			   addrbuf);
++		printf("%s\n", addrbuf);
++	}
+ 	printf("%d IPv4 addresses:\n", data->num_v4_addresses);
+ 	for (i = 0; i < data->num_v4_addresses; i++)
+ 	{
+-- 
+1.6.3.2
+

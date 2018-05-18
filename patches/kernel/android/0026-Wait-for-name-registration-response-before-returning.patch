@@ -1,0 +1,143 @@
+From 1b08997b615bf43f795a9643554d80971e9218a9 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:46:55 -0700
+Subject: [PATCH 26/67] Wait for name registration response before returning from bind
+
+---
+ net/namestack/af_name.c |   96 +++++++++++++++++++++++++++++++++++++++++------
+ 1 files changed, 84 insertions(+), 12 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 0c6edbf..0703009 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -13,6 +13,7 @@
+ enum {
+ 	NAME_CLOSED = 1,
+ 	NAME_RESOLVING,
++	NAME_BINDING,
+ 	NAME_CONNECTING,
+ 	NAME_LISTEN,
+ 	NAME_ESTABLISHED,
+@@ -21,6 +22,7 @@ enum {
+ enum {
+ 	NAMEF_CLOSED      = (1 << NAME_CLOSED),
+ 	NAMEF_RESOLVING   = (1 << NAME_RESOLVING),
++	NAMEF_BINDING     = (1 << NAME_BINDING),
+ 	NAMEF_CONNECTING  = (1 << NAME_CONNECTING),
+ 	NAMEF_LISTEN      = (1 << NAME_LISTEN),
+ 	NAMEF_ESTABLISHED = (1 << NAME_ESTABLISHED),
+@@ -109,28 +111,98 @@ out:
+ 	return 0;
+ }
+ 
++static void name_bind_cb(int result, void *data)
++{
++	struct socket *sock = data;
++	struct sock *sk = sock->sk;
++	struct name_stream_sock *name = name_stream_sk(sk);
++
++	sk->sk_state &= ~NAMEF_BINDING;
++	name->async_error = -result;
++	if (!result)
++	{
++		/* FIXME: need to:
++		 * 1. Attempt to bind to the specified port on each transport
++		 *    socket.  Unfortunately none may exist at the moment,
++		 *    because they're not created except in connect.  That
++		 *    needs to be fixed too.
++		 * 2. Copy the name into the source name (easy, but the
++		 *    fully-qualified name should be in the reply.)
++		 */
++	}
++}
++
++static long name_wait_for_bind(struct sock *sk, long timeo)
++{
++	DEFINE_WAIT(wait);
++
++	prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
++	while ((1 << sk->sk_state) & NAMEF_BINDING) {
++		release_sock(sk);
++		timeo = schedule_timeout(timeo);
++		lock_sock(sk);
++		if (signal_pending(current) || !timeo)
++			break;
++		prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
++	}
++	finish_wait(sk->sk_sleep, &wait);
++	return timeo;
++}
++
+ static int
+ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ {
+ 	struct sockaddr_name *addr = (struct sockaddr_name *)uaddr;
++	struct sock *sk;
++	struct name_stream_sock *name;
+ 	int err;
++	long timeo;
+ 
+-	if (addr_len < sizeof(struct sockaddr_name)) {
++	if (addr_len < sizeof(struct sockaddr_name))
++		return -EINVAL;
++	/* FIXME: need to check whether the name has already been bound */
++	printk(KERN_INFO "requesting bind to %s\n", addr->sname_addr.name);
++
++	sk = sock->sk;
++	name = name_stream_sk(sk);
++	lock_sock(sk);
++
++	switch (sock->state) {
++	default:
+ 		err = -EINVAL;
+ 		goto out;
+-	}
+-	printk(KERN_INFO "requesting bind to %s\n", addr->sname_addr.name);
+-	/* FIXME: need to:
+-	 * 1. Attempt to claim the name (in DNS).  Can't continue until this
+-	 *    succeeds.  This should block the caller until this process
+-	 *    completes, perhaps with another wait loop?
+-	 * 2. Attempt to bind to the specified port on each transport socket.
+-	 *    Unfortunately none may exist at the moment, because they're not
+-	 *    created until connect.  That needs to be fixed too.
+-	 * 3. Copy the name into the source name (easy.)
++	case SS_CONNECTED:
++		err = -EISCONN;
++		goto out;
++	case SS_UNCONNECTED:
++		sk->sk_state |= NAMEF_BINDING;
++		break;
++	};
++
++	/* FIXME: the address(es) to which the name should be bound should
++	 * also be included in the request.  Note that the request is
++	 * stateless:  if the addresses change, a new request can be sent, and
++	 * it should replace the current name registration.
++	 * FIXME: the names should also be unregistered on close.
+ 	 */
+-	err = 0;
++	err = name_send_registration(addr->sname_addr.name, name_bind_cb, sock);
++	if (err)
++		goto out;
++
++	timeo = sock_sndtimeo(sk, 0);
++	if ((1 << sk->sk_state) & NAMEF_BINDING) {
++		if (!timeo || !name_wait_for_bind(sk, timeo))
++			goto out;
++		err = sock_intr_errno(timeo);
++		if (signal_pending(current))
++			goto out;
++	}
++	if (name->async_error)
++		err = name->async_error;
++	else
++		err = 0;
+ out:
++	release_sock(sk);
+ 	return err;
+ }
+ 
+-- 
+1.6.3.2
+

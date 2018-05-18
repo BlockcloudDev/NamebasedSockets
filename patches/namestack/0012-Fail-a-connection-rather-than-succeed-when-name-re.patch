@@ -1,0 +1,36 @@
+From 4e98c855b840bced3a0cb28df6cf11c3b2490626 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:43:46 -0700
+Subject: [PATCH] Fail a connection rather than "succeed" when name resolution fails
+
+---
+ af_name.c |   13 ++++++++-----
+ 1 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 89053ac..983f792 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -143,11 +143,14 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 			goto out;
+ 	}
+ 
+-	/* FIXME: connection may have been closed externally, need to check
+-	 * state.
+-	 */
+-	sock->state = SS_CONNECTED;
+-	err = 0;
++	if ((1 << sk->sk_state) & (NAMEF_CLOSED)) {
++		sock->state = SOCK_DEAD;
++		err = -EHOSTUNREACH;
++	}
++	else {
++		sock->state = SS_CONNECTED;
++		err = 0;
++	}
+ 
+ out:
+ 	release_sock(sk);
+-- 
+1.6.0.4
+

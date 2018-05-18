@@ -1,0 +1,23 @@
+From d7413beebaf07eadeac4ccd775074504d66da3ec Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:33:22 -0700
+Subject: [PATCH 12/21] Define ANDROID for android builds
+
+---
+ Android.mk |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/Android.mk b/Android.mk
+index 2a3d3b2..298c4ec 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -4,5 +4,6 @@ include $(CLEAR_VARS)
+ 
+ LOCAL_MODULE := namestackd
+ LOCAL_SRC_FILES := daemon.c NameStackDaemon.cpp
++LOCAL_CPP_FLAGS := -DANDROID
+ 
+ include $(BUILD_SHARED_LIBRARY)
+-- 
+1.6.3.2
+

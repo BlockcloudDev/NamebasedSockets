@@ -1,0 +1,26 @@
+From ceb8279766ac8b3ce4f4f622b309c056663f049b Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Fri, 18 Sep 2009 10:17:13 -0700
+Subject: [PATCH 2/2] Add option for name-oriented stack
+
+---
+ net/Kconfig |    5 +++++
+ 1 files changed, 5 insertions(+), 0 deletions(-)
+
+diff --git a/net/Kconfig b/net/Kconfig
+index 5250712..783b436 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -257,4 +257,9 @@ source "net/wimax/Kconfig"
+ source "net/rfkill/Kconfig"
+ source "net/9p/Kconfig"
+ 
++menuconfig NAMESTACK
++	bool "Name-oriented stack architecture"
++	depends on IPV6
++	default y
++
+ endif   # if NET
+-- 
+1.6.3.2
+

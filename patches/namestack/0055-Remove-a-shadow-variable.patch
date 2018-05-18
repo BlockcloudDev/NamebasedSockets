@@ -1,0 +1,282 @@
+From 613d3b644001559892fee0ba5c000286651488ff Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:11:30 -0700
+Subject: [PATCH] Remove a shadow variable
+
+---
+ af_name.c |  188 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 files changed, 173 insertions(+), 15 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index bc695c3..31f3f6d 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -6,6 +6,7 @@
+ #include <linux/module.h>
+ #include <net/sock.h>
+ #include <net/inet_connection_sock.h>
++#include <net/inet6_hashtables.h>
+ #include <net/ipv6.h>
+ #include <net/tcp_states.h>
+ #include <net/transp_v6.h>
+@@ -446,19 +447,22 @@ static char *rfc1035_decode_name(const u8 *p, int len)
+ 	return name;
+ }
+ 
+-static int name_option_matches(struct sk_buff *skb, u16 offset,
+-			       const char *name)
++static inline char *name_option_to_str(struct sk_buff *skb, u16 offset)
+ {
+-	int matches = 0;
+ 	const unsigned char *nh = skb_network_header(skb);
+ 	const struct name_opt_hdr *name_hdr =
+ 		(const struct name_opt_hdr *)(nh + offset);
+ 	const u8 *name_ptr = (const u8 *)(name_hdr + 1);
+-	char *option_name;
+ 
+-	//assert(name_hdr->type == NAME_OPTION_DEST_NAME);
+-	option_name = rfc1035_decode_name(name_ptr,
+-					  name_hdr->len);
++	return rfc1035_decode_name(name_ptr, name_hdr->len);
++}
++
++static int name_option_matches(struct sk_buff *skb, u16 offset,
++			       const char *name)
++{
++	int matches = 0;
++	char *option_name = name_option_to_str(skb, offset);
++
+ 	if (option_name) {
+ 		matches = !strcmp(name, option_name);
+ 		printk(KERN_INFO "destination name %s %s %s\n", option_name,
+@@ -468,6 +472,84 @@ static int name_option_matches(struct sk_buff *skb, u16 offset,
+ 	return matches;
+ }
+ 
++struct syn_entry
++{
++	struct in6_addr peer_addr;
++	__be16 peer_port;
++	struct name_addr name;
++	struct hlist_node entry;
++};
++
++/* NAME_SYN_BUCKETS must be a power of 2, or the "& (NAME_SYN_BUCKETS - 1)"
++ * below must be changed to "% NAME_SYN_BUCKETS".
++ */
++#define NAME_SYN_BUCKETS 16
++static struct hlist_head name_stream_syns[NAME_SYN_BUCKETS];
++static DEFINE_SPINLOCK(name_stream_syn_lock);
++
++static void name_stream_store_syn(struct sock *sk, struct sk_buff *skb,
++				  int source_name_offset)
++{
++	u32 bucket;
++	char *source_name;
++	const struct inet_sock *inet = inet_sk(sk);
++	const struct ipv6_pinfo *np = inet6_sk(sk);
++	const struct in6_addr *saddr = &np->rcv_saddr;
++	const __u16 port = inet->dport;
++
++	bucket = inet6_sk_ehashfn(sk) & (NAME_SYN_BUCKETS - 1);
++
++	source_name = name_option_to_str(skb, source_name_offset);
++	if (source_name) {
++		struct syn_entry *entry, *found = NULL;
++		struct hlist_node *node;
++
++		printk(KERN_INFO "see source name option %s\n",
++		       (char *)source_name);
++		printk(KERN_INFO "port is %d, bucket is %d\n", port, bucket);
++
++		/* FIXME: lock each bucket rather than the whole table. */
++		spin_lock_irq(&name_stream_syn_lock);
++		hlist_for_each_entry(entry,
++				     node,
++				     &name_stream_syns[bucket],
++				     entry)
++		{
++			if (!memcmp(saddr, &entry->peer_addr, sizeof(saddr))
++			    && port == entry->peer_port)
++			{
++				found = entry;
++				break;
++			}
++		}
++		if (found)
++		{
++			/* An entry with the same IP address and port exists,
++			 * replace its name.
++			 */
++			strcpy(found->name.name, source_name);
++		}
++		else
++		{
++			found = kzalloc(sizeof(struct syn_entry), GFP_ATOMIC);
++
++			/* No entry was found, insert a new entry into the
++			 * list.
++			 */
++			if (found)
++			{
++				strcpy(found->name.name, source_name);
++				memcpy(&found->peer_addr, saddr, sizeof(saddr));
++				found->peer_port = port;
++				hlist_add_head(&found->entry,
++					       &name_stream_syns[bucket]);
++			}
++		}
++		spin_unlock_irq(&name_stream_syn_lock);
++		kfree(source_name);
++	}
++}
++
+ static struct sock *name_v6_recv_syn(struct sock *sk, struct sk_buff *skb,
+ 				     struct request_sock *req,
+ 				     struct dst_entry *dst)
+@@ -480,15 +562,19 @@ static struct sock *name_v6_recv_syn(struct sock *sk, struct sk_buff *skb,
+ 	const unsigned char *nh = skb_network_header(skb);
+ 	unsigned int packet_len = skb->tail - skb->network_header;
+ 	u8 *nexthdr;
+-	int dest_name_offset = -1;
++	int source_name_offset = -1, dest_name_offset = -1;
+ 
+ 	nexthdr = &ipv6_hdr(skb)->nexthdr;
+ 	offset = sizeof(struct ipv6hdr);
+-	while (offset + 1 <= packet_len && dest_name_offset == -1) {
++	while (offset + 1 <= packet_len) {
+ 		switch (*nexthdr) {
+ 		case NEXTHDR_DEST:
+-			dest_name_offset = ipv6_find_tlv(skb, offset,
+-							 NAME_OPTION_DEST_NAME);
++			if (dest_name_offset == -1)
++				dest_name_offset = ipv6_find_tlv(skb, offset,
++					NAME_OPTION_DEST_NAME);
++			if (source_name_offset == -1)
++				source_name_offset = ipv6_find_tlv(skb, offset,
++					NAME_OPTION_SOURCE_NAME);
+ 			break;
+ 		}
+ 
+@@ -501,8 +587,27 @@ static struct sock *name_v6_recv_syn(struct sock *sk, struct sk_buff *skb,
+ 	 */
+ 	if (dest_name_offset == -1 ||
+ 	    name_option_matches(skb, dest_name_offset,
+-				name->sname.sname_addr.name))
++				name->sname.sname_addr.name)) {
+ 		ret = name->orig_syn_recv_sock(sk, skb, req, dst);
++		if (ret) {
++			if (source_name_offset != -1) {
++				/* The SYN packet contains a source name option,
++				 * so store it for subsequent use by
++				 * name_stream_accept.
++				 * (The more obvious thing to do would be to
++				 * return a struct sock * that contained the
++				 * name in it directly, but the kernel makes
++				 * assumptions about the return type of this
++				 * function that I never fully understood.  The
++				 * effect was to hang or crash the kernel.
++				 * This approach works around my own lack of
++				 * understanding.)
++				 */
++				name_stream_store_syn(ret, skb,
++						      source_name_offset);
++			}
++		}
++	}
+ 	return ret;
+ }
+ 
+@@ -1076,8 +1181,6 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 	}
+ 
+ 	if ((1 << sk->sk_state) & (TCPF_CLOSE)) {
+-		struct name_stream_sock *name = name_stream_sk(sk);
+-
+ 		sock->state = SOCK_DEAD;
+ 		if (name->async_error)
+ 			err = name->async_error;
+@@ -1281,6 +1384,15 @@ handle_incoming:
+ 		get_name_from_v4_sock(&new_name->dname, new_name->ipv4_sock);
+ 	}
+ 	else {
++		const struct inet_sock *inet = inet_sk(new_v6_sk);
++		const struct ipv6_pinfo *np = inet6_sk(new_v6_sk);
++		const struct in6_addr *saddr = &np->rcv_saddr;
++		const __u16 port = inet->dport;
++		u32 bucket;
++		struct syn_entry *entry, *found = NULL;
++		struct hlist_node *node;
++		int get_name_from_addr = 1;
++
+ 		err = -ENOMEM;
+ 		incoming_sock = name_alloc_stream_socket(&init_net, newsock);
+ 		if (!incoming_sock)
+@@ -1292,7 +1404,36 @@ handle_incoming:
+ 			sock_put(incoming_sock);
+ 			goto out_err;
+ 		}
+-		get_name_from_v6_sock(&new_name->dname, new_name->ipv6_sock);
++		bucket = inet6_sk_ehashfn(new_v6_sk) & (NAME_SYN_BUCKETS - 1);
++		printk(KERN_INFO "accepted a connection from port %d, bucket %d\n",
++		       port, bucket);
++		/* FIXME: lock each bucket rather than the whole table. */
++		spin_lock_irq(&name_stream_syn_lock);
++		hlist_for_each_entry(entry,
++				     node,
++				     &name_stream_syns[bucket],
++				     entry)
++		{
++			if (!memcmp(saddr, &entry->peer_addr, sizeof(saddr))
++			    && port == entry->peer_port)
++			{
++				found = entry;
++				break;
++			}
++		}
++		if (found)
++		{
++			strcpy(new_name->dname.sname_addr.name,
++			       found->name.name);
++			new_name->dname.sname_port = found->peer_port;
++			get_name_from_addr = 0;
++			hlist_del(&found->entry);
++			kfree(found);
++		}
++		spin_unlock_irq(&name_stream_syn_lock);
++		if (get_name_from_addr)
++			get_name_from_v6_sock(&new_name->dname,
++					      new_name->ipv6_sock);
+ 	}
+ 	memcpy(&new_name->sname, &name->sname, sizeof(name->sname));
+ 	printk(KERN_INFO "connection accepted from %s\n",
+@@ -1589,9 +1730,26 @@ out:
+ 
+ void name_af_exit(void)
+ {
++	int i;
++
+ 	proto_unregister(&name_stream_proto);
+ 	proto_unregister(&name_dgram_proto);
+ 	sock_unregister(name_family_ops.family);
++	for (i = 0; i < NAME_SYN_BUCKETS; i++)
++	{
++		struct syn_entry *entry;
++		struct hlist_node *node, *next;
++
++		hlist_for_each_entry_safe(entry,
++					  node,
++					  next,
++					  &name_stream_syns[i],
++					  entry)
++		{
++			hlist_del(node);
++			kfree(entry);
++		}
++	}
+ }
+ 
+ EXPORT_SYMBOL(name_af_init);
+-- 
+1.6.0.4
+

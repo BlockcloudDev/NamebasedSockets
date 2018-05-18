@@ -1,0 +1,36 @@
+From 407bf153ff8baee2b2ea84a3fb07264ab17e37d2 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:50:06 -0700
+Subject: [PATCH 38/67] Don't attempt to resolve localhost names, connect to them directly
+
+---
+ net/namestack/af_name.c |   13 +++++++++++--
+ 1 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 81db3d0..70a366b 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -566,8 +566,17 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 		sock->state = SS_CONNECTING;
+ 		sk->sk_state = NAME_RESOLVING;
+ 		memcpy(&name->dname, uaddr, addr_len);
+-		err = name_send_query(sname->sname_addr.name,
+-				      name_stream_query_resolve, sock);
++		if (name_is_local(name->dname.sname_addr.name)) {
++			__u8 loopback[16] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 };
++			struct in6_addr in6;
++
++			memcpy(&in6.s6_addr, &loopback, sizeof(in6.s6_addr));
++			err = name_stream_connect_to_v6_address(sk, sizeof(in6),
++								(const u_char *)&in6);
++		}
++		else
++			err = name_send_query(sname->sname_addr.name,
++					      name_stream_query_resolve, sock);
+ 		if (err)
+ 			goto out;
+ 
+-- 
+1.6.3.2
+

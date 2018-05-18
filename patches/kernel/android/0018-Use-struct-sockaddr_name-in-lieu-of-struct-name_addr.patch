@@ -1,0 +1,60 @@
+From a709d635bcb980e3126f2ada27208c38bc997f85 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:45:20 -0700
+Subject: [PATCH 18/67] Use struct sockaddr_name in lieu of struct name_addr for source and destination names
+
+---
+ net/namestack/af_name.c |   16 ++++++++--------
+ 1 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index a1c510b..0a38133 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -11,8 +11,8 @@
+ struct name_stream_sock
+ {
+ 	struct sock sk;
+-	struct name_addr sname;
+-	struct name_addr dname;
++	struct sockaddr_name sname;
++	struct sockaddr_name dname;
+ 	u_char *dname_answer;
+ 	int dname_answer_len;
+ 	uint16_t dname_answer_index;
+@@ -359,8 +359,8 @@ static struct sock *name_alloc_stream_socket(struct net *net,
+ 	sock_init_data(sock, sk);
+ 
+ 	name = name_stream_sk(sk);
+-	name->sname.name[0] = 0;
+-	name->dname.name[0] = 0;
++	memset(&name->sname, 0, sizeof(name->sname));
++	memset(&name->dname, 0, sizeof(name->dname));
+ 	name->dname_answer = NULL;
+ 	name->dname_answer_len = 0;
+ 	name->dname_answer_index = 0;
+@@ -414,8 +414,8 @@ static const struct proto_ops name_dgram_ops = {
+ struct name_dgram_sock
+ {
+ 	struct sock sk;
+-	struct name_addr sname;
+-	struct name_addr dname;
++	struct sockaddr_name sname;
++	struct sockaddr_name dname;
+ };
+ 
+ static struct proto name_dgram_proto = {
+@@ -442,8 +442,8 @@ static struct sock *name_alloc_dgram_socket(struct net *net,
+ 	sock_init_data(sock, sk);
+ 
+ 	name = name_dgram_sk(sk);
+-	name->sname.name[0] = 0;
+-	name->dname.name[0] = 0;
++	memset(&name->sname, 0, sizeof(name->sname));
++	memset(&name->dname, 0, sizeof(name->dname));
+ out:
+ 	return sk;
+ }
+-- 
+1.6.3.2
+

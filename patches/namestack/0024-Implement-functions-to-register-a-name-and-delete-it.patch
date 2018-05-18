@@ -1,0 +1,123 @@
+From d1cdccb71baad95169cd6bbac2957783579922ab Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:46:38 -0700
+Subject: [PATCH] Implement functions to register a name and delete its registration
+
+---
+ main.c           |   72 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ namestack_priv.h |    5 +++
+ 2 files changed, 77 insertions(+), 0 deletions(-)
+
+diff --git a/main.c b/main.c
+index 13e95fc..e74bda1 100644
+--- a/main.c
++++ b/main.c
+@@ -186,6 +186,39 @@ handle_name_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ }
+ 
+ static int
++handle_register_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
++{
++	struct pending_node *node;
++
++	printk("received reply message from user %d, process %d\n",
++		NETLINK_CREDS(skb)->uid,
++		NETLINK_CREDS(skb)->pid);
++	node = pending_queue_find_and_remove(nlh->nlmsg_seq);
++	if (node)
++	{
++		int result;
++
++		printk(KERN_INFO "found reply on pending queue\n");
++		if (NLMSG_PAYLOAD(nlh, 0) >= sizeof(result))
++		{
++			register_cb cb = node->cb;
++
++			memcpy(&result, NLMSG_DATA(nlh), sizeof(result));
++			printk(KERN_INFO "result is %d\n", result);
++			cb(result, node->data);
++		}
++		else
++			printk(KERN_WARNING
++			       "invalid payload length in reply\n");
++	}
++	else
++		printk(KERN_WARNING "reply for unknown request\n");
++	/* Send an empty REPLY as an ack */
++	return namestack_send_message(NETLINK_CREDS(skb)->pid,
++		NAME_STACK_NAME_REPLY, NULL, 0);
++}
++
++static int
+ nos_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+ {
+ 	int err = 0;
+@@ -197,6 +230,9 @@ nos_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+ 	case NAME_STACK_NAME_REPLY:
+ 		err = handle_name_reply(skb, nlh);
+ 		break;
++	case NAME_STACK_REGISTER_REPLY:
++		err = handle_register_reply(skb, nlh);
++		break;
+ 	default:
+ 		err = -ENOSYS;
+ 	}
+@@ -307,5 +343,41 @@ int name_send_query(const char *name, query_resolv_cb cb, void *data)
+ 	return err;
+ }
+ 
++int name_send_registration(const char *name, register_cb cb, void *data)
++{
++	int err;
++
++	if (!daemon_pid) {
++		printk(KERN_WARNING "no resolver daemon, unable to send query\n");
++		err = -ENOSYS;
++	}
++	else {
++		printk(KERN_INFO "registering %s\n", name);
++		/* FIXME:  who handles retrying in case of failure? */
++		err = namestack_send_message_tracked(daemon_pid,
++						     NAME_STACK_REGISTER_QUERY,
++						     name, strlen(name) + 1,
++						     cb, data);
++	}
++	return err;
++}
++
++void name_delete_registration(const char *name)
++{
++	int err;
++
++	if (!daemon_pid) {
++		printk(KERN_WARNING "no resolver daemon, unable to send query\n");
++		err = -ENOSYS;
++	}
++	else {
++		printk(KERN_INFO "deleting registered name %s\n", name);
++		/* FIXME:  who handles retrying in case of failure? */
++		err = namestack_send_message(daemon_pid,
++					     NAME_STACK_REGISTER_DELETE,
++					     name, strlen(name) + 1);
++	}
++}
++
+ module_init(namestack_init);
+ module_exit(namestack_exit);
+diff --git a/namestack_priv.h b/namestack_priv.h
+index 8f1d15f..d134859 100644
+--- a/namestack_priv.h
++++ b/namestack_priv.h
+@@ -12,4 +12,9 @@ typedef void (*query_resolv_cb)(const __u8 *response, int len, void *data);
+ int name_send_query(const char *name, query_resolv_cb cb, void *data);
+ void name_cancel_query(void *data);
+ 
++/* Name registration (bind()/DNS update) functions */
++typedef void (*register_cb)(int result, void *data);
++int name_send_registration(const char *name, register_cb cb, void *data);
++void name_delete_registration(const char *name);
++
+ #endif /* NAMESTACK_PRIV_H */
+-- 
+1.6.0.4
+

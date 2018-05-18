@@ -1,0 +1,54 @@
+From a7280370a69100d1d814e5966493bb79115d932f Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:43:39 -0700
+Subject: [PATCH 11/67] Close connection requests when name resolution fails
+
+---
+ net/namestack/af_name.c |   18 +++++++++++++++---
+ 1 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 7bf9fdb..89053ac 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -32,13 +32,15 @@ out:
+ }
+ 
+ enum {
+-	NAME_RESOLVING = 1,
++	NAME_CLOSED = 1,
++	NAME_RESOLVING,
+ 	NAME_CONNECTING,
+ 	NAME_LISTEN,
+ 	NAME_ESTABLISHED,
+ };
+ 
+ enum {
++	NAMEF_CLOSED      = (1 << NAME_CLOSED),
+ 	NAMEF_RESOLVING   = (1 << NAME_RESOLVING),
+ 	NAMEF_CONNECTING  = (1 << NAME_CONNECTING),
+ 	NAMEF_LISTEN      = (1 << NAME_LISTEN),
+@@ -68,8 +70,18 @@ static void name_stream_query_resolve(const u_char *response, int len,
+ 	struct socket *sock = data;
+ 	struct sock *sk = sock->sk;
+ 
+-	sk->sk_state = NAME_CONNECTING;
+-	/* FIXME: send off connect request here */
++	if (len > 0)
++	{
++		sk->sk_state = NAME_CONNECTING;
++		sk->sk_state_change(sk);
++		/* FIXME: send off connect request here */
++	}
++	else
++	{
++		/* Name resolution failure, close request */
++		sk->sk_state = NAME_CLOSED;
++		sk->sk_state_change(sk);
++	}
+ }
+ 
+ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+-- 
+1.6.3.2
+

@@ -1,0 +1,25 @@
+From ad124b3c36186da3b968fb681cafde376f0be59c Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Fri, 18 Sep 2009 05:29:10 -0700
+Subject: [PATCH] Add CONFIG_NAMESTACK_MODULE to compile flags
+
+---
+ Makefile |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index e63cadc..8aadb5c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,8 @@
+ obj-m += namestack.o
+ namestack-objs := main.o af_name.o dns.o namecache.o address.o
+ 
++EXTRA_CFLAGS := -DCONFIG_NAMESTACK_MODULE
++
+ # ordinary compiles:
+ #KERN_BUILD := /lib/modules/$(shell uname -r)/build
+ KERN_BUILD := ../linux-2.6.27
+-- 
+1.6.0.4
+

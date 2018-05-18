@@ -1,0 +1,59 @@
+From 7b08cab968cd4179869f5f828625dd2188f43fd5 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:14:40 -0700
+Subject: [PATCH] Remove unneeded helper function for binding IPv6 addresses
+
+---
+ af_name.c |   23 ++++++++---------------
+ 1 files changed, 8 insertions(+), 15 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 72fa508..40182bf 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -170,19 +170,6 @@ static int name_bind_ipv4(struct socket *sock, const __be32 *addr, __be16 port)
+ 	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
+ }
+ 
+-static int name_bind_ipv6(struct socket *sock, const char *fqdn,
+-			  const struct in6_addr *addr, __be16 port)
+-{
+-	struct sockaddr_in6 sin;
+-
+-	memset(&sin, 0, sizeof(sin));
+-	if (addr)
+-		memcpy(&sin.sin6_addr, addr, sizeof(sin.sin6_addr));
+-	sin.sin6_port = port;
+-	/* FIXME: need to tie the fqdn to the socket somehow, but how? */
+-	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
+-}
+-
+ /* Stolen from net/ipv6/ipv6_sockglue.c */
+ static
+ struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
+@@ -741,14 +728,20 @@ static int name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn,
+ 			goto out;
+ 	}
+ 	if (name->sname.sname_port || v6addr) {
++		struct sockaddr_in6 sin;
++
+ 		if (!name->ipv6_sock) {
+ 			err = name_create_v6_sock(SOCK_STREAM, 0,
+ 						  &name->ipv6_sock, name);
+ 			if (err)
+ 				goto out;
+ 		}
+-		err = name_bind_ipv6(name->ipv6_sock, fqdn, v6addr,
+-				     name->sname.sname_port);
++		memset(&sin, 0, sizeof(sin));
++		if (v6addr)
++			memcpy(&sin.sin6_addr, v6addr, sizeof(sin.sin6_addr));
++		sin.sin6_port = name->sname.sname_port;
++		err = kernel_bind(name->ipv6_sock, (struct sockaddr *)&sin,
++				  sizeof(sin));
+ 	}
+ out:
+ 	return err;
+-- 
+1.6.0.4
+

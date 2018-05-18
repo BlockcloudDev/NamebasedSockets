@@ -1,0 +1,99 @@
+From 38190ccd820c8d8b55dc6c718b951045a3dab009 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:47:19 -0700
+Subject: [PATCH 28/67] Create separate sockets for IPv4 and IPv6
+
+---
+ net/namestack/af_name.c |   35 +++++++++++++++++++++--------------
+ 1 files changed, 21 insertions(+), 14 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 5b56622..c048c93 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -37,7 +37,8 @@ struct name_stream_sock
+ 	int dname_answer_len;
+ 	uint16_t dname_answer_index;
+ 	int async_error;
+-	struct socket *transport_sock;
++	struct socket *ipv4_sock;
++	struct socket *ipv6_sock;
+ };
+ 
+ static inline struct name_stream_sock *name_stream_sk(const struct sock *sk)
+@@ -97,10 +98,15 @@ static int name_stream_release(struct socket *sock)
+ 		name->dname_answer_len = 0;
+ 		name->dname_answer_index = 0;
+ 	}
+-	if (name->transport_sock) {
+-		kernel_sock_shutdown(name->transport_sock, SHUT_WR);
+-		sock_release(name->transport_sock);
+-		name->transport_sock = NULL;
++	if (name->ipv6_sock) {
++		kernel_sock_shutdown(name->ipv6_sock, SHUT_WR);
++		sock_release(name->ipv6_sock);
++		name->ipv6_sock = NULL;
++	}
++	if (name->ipv4_sock) {
++		kernel_sock_shutdown(name->ipv4_sock, SHUT_WR);
++		sock_release(name->ipv4_sock);
++		name->ipv4_sock = NULL;
+ 	}
+ 
+ 	sock_set_flag(sk, SOCK_DEAD);
+@@ -261,17 +267,17 @@ static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
+ 	sprintf(p, "%x", ntohs(addr->s6_addr16[7]));
+ 	printk(KERN_INFO "connect to IPv6 address %s:%d\n", address,
+ 	       ntohs(name->dname.sname_port));
+-	err = sock_create_kern(PF_INET6, SOCK_STREAM, 0, &name->transport_sock);
++	err = sock_create_kern(PF_INET6, SOCK_STREAM, 0, &name->ipv6_sock);
+ 	if (err)
+ 		goto out;
+-	name->transport_sock->sk->sk_user_data = name;
+-	name->transport_sock->sk->sk_state_change = name_stream_state_change;
++	name->ipv6_sock->sk->sk_user_data = name;
++	name->ipv6_sock->sk->sk_state_change = name_stream_state_change;
+ 	memset(&sin6, 0, sizeof(sin6));
+ 	sin6.sin6_family = AF_INET6;
+ 	sin6.sin6_port = name->dname.sname_port;
+ 	memcpy(&sin6.sin6_addr, addr, sizeof(*addr));
+ 	/* FIXME: need to set name options in socket */
+-	err = kernel_connect(name->transport_sock, (struct sockaddr *)&sin6,
++	err = kernel_connect(name->ipv6_sock, (struct sockaddr *)&sin6,
+ 			     sizeof(sin6), O_NONBLOCK);
+ 	/* The expected error is EINPROGRESS, as the socket connection kicks
+ 	 * off.  Return success in this case.
+@@ -313,16 +319,16 @@ static int name_stream_connect_to_v4_address(struct sock *sk, uint16_t rdlength,
+ 	}
+ 	printk(KERN_INFO "connect to IPv4 address %s:%d\n", address,
+ 	       ntohs(name->dname.sname_port));
+-	err = sock_create_kern(PF_INET, SOCK_STREAM, 0, &name->transport_sock);
++	err = sock_create_kern(PF_INET, SOCK_STREAM, 0, &name->ipv4_sock);
+ 	if (err)
+ 		goto out;
+-	name->transport_sock->sk->sk_user_data = name;
+-	name->transport_sock->sk->sk_state_change = name_stream_state_change;
++	name->ipv4_sock->sk->sk_user_data = name;
++	name->ipv4_sock->sk->sk_state_change = name_stream_state_change;
+ 	memset(&sin, 0, sizeof(sin));
+ 	sin.sin_family = AF_INET;
+ 	sin.sin_port = name->dname.sname_port;
+ 	sin.sin_addr.s_addr = *(uint32_t *)rdata;
+-	err = kernel_connect(name->transport_sock, (struct sockaddr *)&sin,
++	err = kernel_connect(name->ipv4_sock, (struct sockaddr *)&sin,
+ 			     sizeof(sin), O_NONBLOCK);
+ 	/* The expected error is EINPROGRESS, as the socket connection kicks
+ 	 * off.  Return success in this case.
+@@ -542,7 +548,8 @@ static struct sock *name_alloc_stream_socket(struct net *net,
+ 	name->dname_answer_len = 0;
+ 	name->dname_answer_index = 0;
+ 	name->async_error = 0;
+-	name->transport_sock = NULL;
++	name->ipv4_sock = NULL;
++	name->ipv6_sock = NULL;
+ out:
+ 	return sk;
+ }
+-- 
+1.6.3.2
+

@@ -1,0 +1,118 @@
+From a131887116d20cd248eb9e0e05faf3f942d23a8f Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:10:13 -0700
+Subject: [PATCH] Use TCP states where applicable, and make our own states not overlap with TCP states
+
+---
+ af_name.c |   26 ++++++++++----------------
+ 1 files changed, 10 insertions(+), 16 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index e32d6d9..bc695c3 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -15,21 +15,15 @@
+ #include "namestack_priv.h"
+ 
+ enum {
+-	NAME_CLOSED = 1,
+-	NAME_RESOLVING,
++	NAME_RESOLVING = TCP_MAX_STATES, /* Don't overlap with TCP states */
+ 	NAME_BINDING,
+ 	NAME_CONNECTING,
+-	NAME_LISTEN,
+-	NAME_ESTABLISHED,
+ };
+ 
+ enum {
+-	NAMEF_CLOSED      = (1 << NAME_CLOSED),
+ 	NAMEF_RESOLVING   = (1 << NAME_RESOLVING),
+ 	NAMEF_BINDING     = (1 << NAME_BINDING),
+ 	NAMEF_CONNECTING  = (1 << NAME_CONNECTING),
+-	NAMEF_LISTEN      = (1 << NAME_LISTEN),
+-	NAMEF_ESTABLISHED = (1 << NAME_ESTABLISHED),
+ };
+ 
+ static void name_stream_state_change(struct sock *sk)
+@@ -43,7 +37,7 @@ static void name_stream_state_change(struct sock *sk)
+ 	printk(KERN_INFO "sk_state is %d\n", sk->sk_state);
+ 	switch (sk->sk_state) {
+ 	case TCP_ESTABLISHED:
+-		name->sk.sk_state = NAME_ESTABLISHED;
++		name->sk.sk_state = TCP_ESTABLISHED;
+ 		name->sk.sk_state_change(&name->sk);
+ 		break;
+ 	case TCP_FIN_WAIT1:
+@@ -948,7 +942,7 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 			/* FIXME: get next address rather than closing the
+ 			 * connection request.
+ 			 */
+-			sk->sk_state = NAME_CLOSED;
++			sk->sk_state = TCP_CLOSE;
+ 			sk->sk_state_change(sk);
+ 		}
+ 	}
+@@ -962,13 +956,13 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 			/* FIXME: get next address rather than closing the
+ 			 * connection request.
+ 			 */
+-			sk->sk_state = NAME_CLOSED;
++			sk->sk_state = TCP_CLOSE;
+ 			sk->sk_state_change(sk);
+ 		}
+ 	}
+ 	else {
+ 		printk(KERN_WARNING "no supported address type found\n");
+-		sk->sk_state = NAME_CLOSED;
++		sk->sk_state = TCP_CLOSE;
+ 		sk->sk_state_change(sk);
+ 		err = -EHOSTUNREACH;
+ 	}
+@@ -989,7 +983,7 @@ static void name_stream_query_resolve(const u_char *response, int len,
+ 		if (!name->dname_answer)
+ 		{
+ 			/* Allocation failure, close request */
+-			sk->sk_state = NAME_CLOSED;
++			sk->sk_state = TCP_CLOSE;
+ 			sk->sk_state_change(sk);
+ 		}
+ 		else
+@@ -1005,7 +999,7 @@ static void name_stream_query_resolve(const u_char *response, int len,
+ 	else
+ 	{
+ 		/* Name resolution failure, close request */
+-		sk->sk_state = NAME_CLOSED;
++		sk->sk_state = TCP_CLOSE;
+ 		sk->sk_state_change(sk);
+ 	}
+ }
+@@ -1081,7 +1075,7 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 			goto out;
+ 	}
+ 
+-	if ((1 << sk->sk_state) & (NAMEF_CLOSED)) {
++	if ((1 << sk->sk_state) & (TCPF_CLOSE)) {
+ 		struct name_stream_sock *name = name_stream_sk(sk);
+ 
+ 		sock->state = SOCK_DEAD;
+@@ -1106,7 +1100,7 @@ static int name_stream_wait_for_accept(struct socket *sock, long timeo)
+ 	DEFINE_WAIT(wait);
+ 
+ 	prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
+-	while ((1 << sk->sk_state) & NAMEF_LISTEN) {
++	while ((1 << sk->sk_state) & TCPF_LISTEN) {
+ 		release_sock(sk);
+ 		timeo = schedule_timeout(timeo);
+ 		lock_sock(sk);
+@@ -1244,7 +1238,7 @@ static int name_stream_accept(struct socket *sock, struct socket *newsock,
+ 	if (err != -EAGAIN)
+ 		goto out_err;
+ 
+-	sk->sk_state = NAME_LISTEN;
++	sk->sk_state = TCP_LISTEN;
+ 
+ 	v6_sk = name->ipv6_sock->sk;
+ 	v6_icsk = inet_csk(v6_sk);
+-- 
+1.6.0.4
+

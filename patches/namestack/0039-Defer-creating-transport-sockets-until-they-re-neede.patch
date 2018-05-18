@@ -1,0 +1,77 @@
+From e316a3c6b60c7aa94d3c4ef91f0712e230eac83e Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:50:16 -0700
+Subject: [PATCH] Defer creating transport sockets until they're needed
+
+---
+ af_name.c |   47 ++++++++++++++++++++++++++++++++++++++++++-----
+ 1 files changed, 42 insertions(+), 5 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 70a366b..4e15d25 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -136,11 +136,36 @@ static int name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn,
+ 	int err;
+ 
+ 	printk(KERN_INFO "bound to %s\n", fqdn);
+-	err = name_bind_ipv6(name->ipv6_sock, fqdn, name->sname.sname_port,
+-			     local);
+-	if (!err)
+-		err = name_bind_ipv4(name->ipv4_sock, name->sname.sname_port,
+-				     local);
++	/* If a particular port is specified, bind() must fail if the port is
++	 * unavailable, hence we must create the transport sockets if they
++	 * don't already exist so we may attempt to bind to the specified port.
++	 * If no port is specified, name_register() has already checked that
++	 * the name is available, so bind() succeeds without needing to create
++	 * the sockets yet.  (The sockets will be created as necessary during
++	 * connect() or listen().)
++	 */
++	if (name->sname.sname_port) {
++		if (!name->ipv6_sock) {
++			err = sock_create_kern(PF_INET6, SOCK_STREAM, 0,
++					       &name->ipv6_sock);
++			if (err)
++				goto out;
++		}
++		if (!name->ipv4_sock) {
++			err = sock_create_kern(PF_INET, SOCK_STREAM, 0,
++					       &name->ipv4_sock);
++			if (err)
++				goto out;
++		}
++		err = name_bind_ipv6(name->ipv6_sock, fqdn,
++				     name->sname.sname_port, local);
++		if (!err)
++			err = name_bind_ipv4(name->ipv4_sock,
++					     name->sname.sname_port, local);
++	}
++	else
++		err = 0;
++out:
+ 	return err;
+ }
+ 
+@@ -631,6 +656,18 @@ static int name_stream_listen(struct socket *sock, int backlog)
+ 	/* FIXME: what does it mean to listen on more than one socket?  And
+ 	 * what does backlog mean?
+ 	 */
++	if (!name->ipv6_sock) {
++		err = sock_create_kern(PF_INET6, SOCK_STREAM, 0,
++				       &name->ipv6_sock);
++		if (err)
++			goto out;
++	}
++	if (!name->ipv4_sock) {
++		err = sock_create_kern(PF_INET, SOCK_STREAM, 0,
++				       &name->ipv4_sock);
++		if (err)
++			goto out;
++	}
+ 	err = kernel_listen(name->ipv6_sock, backlog);
+ 	if (!err)
+ 		err = kernel_listen(name->ipv4_sock, backlog);
+-- 
+1.6.0.4
+

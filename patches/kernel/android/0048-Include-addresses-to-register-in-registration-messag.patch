@@ -1,0 +1,103 @@
+From d25d3e542ba382f6943aa44afd5adc9b8f4c0b68 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:51:55 -0700
+Subject: [PATCH 48/67] Include addresses to register in registration message
+
+---
+ net/namestack/af_name.c        |    5 ++++-
+ net/namestack/main.c           |   33 +++++++++++++++++++++++++++++++--
+ net/namestack/namestack_priv.h |    4 +++-
+ 3 files changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 4658eeb..6329c7c 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -260,8 +260,11 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 		err = choose_addresses(&num_v6_addresses, &v6_addresses,
+ 				       &num_v4_addresses, &v4_addresses);
+ 		if (!err) {
+-			/* FIXME: send addresses to register with name */
+ 			err = name_send_registration(fully_qualified_name,
++						     v6_addresses,
++						     num_v6_addresses,
++						     v4_addresses,
++						     num_v4_addresses,
+ 						     name_register_cb, sock);
+ 			kfree(v6_addresses);
+ 			kfree(v4_addresses);
+diff --git a/net/namestack/main.c b/net/namestack/main.c
+index 4c7bfdf..b304a85 100644
+--- a/net/namestack/main.c
++++ b/net/namestack/main.c
+@@ -416,7 +416,12 @@ int name_fully_qualify(const char *name, qualify_cb cb, void *data)
+ 	return err;
+ }
+ 
+-int name_send_registration(const char *name, register_cb cb, void *data)
++int name_send_registration(const char *name,
++			   const struct in6_addr *v6_addresses,
++			   int num_v6_addresses,
++			   const __be32 *v4_addresses,
++			   int num_v4_addresses,
++			   register_cb cb, void *data)
+ {
+ 	int err;
+ 
+@@ -425,13 +430,37 @@ int name_send_registration(const char *name, register_cb cb, void *data)
+ 		err = -ENOSYS;
+ 	}
+ 	else {
++		char *payload, *ptr;
++		size_t name_len, len;
++
+ 		printk(KERN_INFO "registering %s\n", name);
++		name_len = strlen(name) + 1;
++		len = name_len;
++		len += sizeof(int) + num_v6_addresses * sizeof(struct in6_addr);
++		len += sizeof(int) + num_v4_addresses * sizeof(__be32);
++		err = -ENOMEM;
++		payload = kmalloc(len, GFP_ATOMIC);
++		if (!payload)
++			goto out;
++		ptr = payload;
++		memcpy(ptr, name, name_len);
++		ptr += name_len;
++		memcpy(ptr, &num_v6_addresses, sizeof(int));
++		ptr += sizeof(int);
++		memcpy(ptr, v6_addresses,
++		       num_v6_addresses * sizeof(struct in6_addr));
++		ptr += num_v6_addresses * sizeof(struct in6_addr);
++		memcpy(ptr, &num_v4_addresses, sizeof(int));
++		ptr += sizeof(int);
++		memcpy(ptr, v4_addresses, num_v4_addresses * sizeof(__be32));
+ 		/* FIXME:  who handles retrying in case of failure? */
+ 		err = namestack_send_message_tracked(daemon_pid,
+ 						     NAME_STACK_REGISTER_QUERY,
+-						     name, strlen(name) + 1,
++						     payload, len,
+ 						     cb, data);
++		kfree(payload);
+ 	}
++out:
+ 	return err;
+ }
+ 
+diff --git a/net/namestack/namestack_priv.h b/net/namestack/namestack_priv.h
+index 89a5709..0e16eef 100644
+--- a/net/namestack/namestack_priv.h
++++ b/net/namestack/namestack_priv.h
+@@ -50,7 +50,9 @@ typedef void (*qualify_cb)(const char *name, void *data);
+ int name_fully_qualify(const char *name, qualify_cb cb, void *data);
+ typedef void (*register_cb)(int result, const char *name, void *data);
+ /* FIXME: needs to be given a list of addresses */
+-int name_send_registration(const char *name, register_cb cb, void *data);
++int name_send_registration(const char *name, const struct in6_addr *v6_addresses,
++			   int num_v6_addresses, const __be32 *v4_addresses,
++			   int num_v4_addresses, register_cb cb, void *data);
+ void name_delete_registration(const char *name);
+ 
+ /* Name cache functions */
+-- 
+1.6.3.2
+

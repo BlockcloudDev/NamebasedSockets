@@ -1,0 +1,253 @@
+From dde3904a0ad454d3b7e2467828b856c5dde4829f Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:51:43 -0700
+Subject: [PATCH] Add function to choose addresses for a name
+
+---
+ Makefile         |    2 +-
+ address.c        |  159 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ af_name.c        |   20 ++++++--
+ namestack_priv.h |   12 ++++
+ 4 files changed, 188 insertions(+), 5 deletions(-)
+ create mode 100644 address.c
+
+diff --git a/Makefile b/Makefile
+index 0f2f774..e63cadc 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,5 +1,5 @@
+ obj-m += namestack.o
+-namestack-objs := main.o af_name.o dns.o namecache.o
++namestack-objs := main.o af_name.o dns.o namecache.o address.o
+ 
+ # ordinary compiles:
+ #KERN_BUILD := /lib/modules/$(shell uname -r)/build
+diff --git a/address.c b/address.c
+new file mode 100644
+index 0000000..c49eeeb
+--- /dev/null
++++ b/address.c
+@@ -0,0 +1,159 @@
++#include <linux/kernel.h>
++#include <linux/module.h>  
++#include <linux/netdevice.h>
++#include <linux/inetdevice.h>
++#include <net/net_namespace.h>
++#include <net/if_inet6.h>
++
++static void print_ip4addr(const __be32 *addr)
++{
++	char address[16], *p;
++	const u_char *addrp;
++
++	p = address;
++	for (addrp = (u_char *)addr;
++	     addrp - (u_char *)addr < sizeof(__be32);
++	     addrp++)
++	{
++		int n;
++
++		sprintf(p, "%d%n", *addrp, &n);
++		p += n;
++		if (addrp < (u_char *)addr + sizeof(__be32) - 1)
++			*p++ = '.';
++	}
++	printk(KERN_INFO "IPv4 address %s\n", address);
++}
++
++static void print_ip6addr(const struct in6_addr *addr)
++{
++	char address[46], *p;
++	int i, in_zero = 0;
++
++	p = address;
++	for (i = 0; i < 7; i++)
++	{
++		if (!addr->s6_addr16[i])
++		{
++			if (i == 0)
++				*p++ = ':';
++			if (!in_zero)
++			{
++				*p++ = ':';
++				in_zero = 1;
++			}
++		}
++		else
++		{
++			int n;
++
++			sprintf(p, "%x:%n", ntohs(addr->s6_addr16[i]), &n);
++			p += n;
++			in_zero = 0;
++		}
++	}
++	sprintf(p, "%x", ntohs(addr->s6_addr16[7]));
++	printk(KERN_INFO "IPv6 address %s\n", address);
++}
++
++/* FIXME: this should use some heuristic to determine a preferred
++ * interface/address.  For now, it simply chooses the first up, non-loopback
++ * address as the "best".
++ * It also should determine a public/reachable address for an interface.
++ */
++int choose_addresses(int *num_v6_addresses, struct in6_addr **v6_addresses,
++		     int *num_v4_addresses, __be32 **v4_addresses)
++{
++	struct net *net = &init_net;
++	struct net_device *dev;
++	int n_v6_addresses = 0;
++	int n_v4_addresses = 0;
++	struct in6_addr *pv6;
++	__be32 *pv4;
++	int err;
++
++	/* FIXME: lock net? */
++	for_each_netdev(net, dev) {
++		if (!(dev->flags & IFF_UP))
++			continue;
++		if (dev->flags & IFF_LOOPBACK)
++			continue;
++		if (dev->ip6_ptr) {
++			struct inet6_dev *in6 = dev->ip6_ptr;
++			struct inet6_ifaddr *addr;
++
++			for (addr = in6->addr_list; addr; addr = addr->if_next)
++				n_v6_addresses++;
++		}
++		if (dev->ip_ptr) {
++			struct in_device *in4 = dev->ip_ptr;
++			struct in_ifaddr *addr;
++
++			for (addr = in4->ifa_list; addr; addr = addr->ifa_next)
++				n_v4_addresses++;
++		}
++	}
++	err = -ENOMEM;
++	if (n_v6_addresses) {
++		*v6_addresses = kmalloc(n_v6_addresses *
++					sizeof(struct inet6_ifaddr),
++					GFP_ATOMIC);
++		if (!*v6_addresses)
++			goto out;
++		else
++			*num_v6_addresses = n_v6_addresses;
++	}
++	else {
++		*v6_addresses = NULL;
++		*num_v6_addresses = 0;
++	}
++	if (n_v4_addresses) {
++		*v4_addresses = kmalloc(n_v4_addresses *
++					sizeof(struct in_ifaddr),
++					GFP_ATOMIC);
++		if (!*v4_addresses) {
++			kfree(*v6_addresses);
++			goto out;
++		}
++		else
++			*num_v4_addresses = n_v4_addresses;
++	}
++	else {
++		*v4_addresses = NULL;
++		*num_v4_addresses = 0;
++	}
++	err = 0;
++	pv6 = *v6_addresses;
++	pv4 = *v4_addresses;
++	for_each_netdev(net, dev) {
++		if (!(dev->flags & IFF_UP))
++			continue;
++		if (dev->flags & IFF_LOOPBACK)
++			continue;
++		printk(KERN_INFO "adding addresses from %s\n", dev->name);
++		if (dev->ip6_ptr) {
++			struct inet6_dev *in6 = dev->ip6_ptr;
++			struct inet6_ifaddr *addr;
++
++			for (addr = in6->addr_list; addr;
++			     addr = addr->if_next) {
++				print_ip6addr(&addr->addr);
++				*pv6 = addr->addr;
++				pv6++;
++			}
++		}
++		if (dev->ip_ptr) {
++			struct in_device *in4 = dev->ip_ptr;
++			struct in_ifaddr *addr;
++
++			for (addr = in4->ifa_list; addr;
++			     addr = addr->ifa_next) {
++				print_ip4addr(&addr->ifa_address);
++				*pv4 = addr->ifa_address;
++				pv4++;
++			}
++		}
++	}
++out:
++	return err;
++}
+diff --git a/af_name.c b/af_name.c
+index dd9e217..4658eeb 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -240,7 +240,6 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 	err = name_cache_add(fully_qualified_name, sock);
+ 	if (err)
+ 		goto out;
+-	/* FIXME: need to select addresses to register for name */
+ 	//assert(strlen(fully_qualified_name) > 1);
+ 	if (!strchr(fully_qualified_name, '.')) {
+ 		/* FIXME: name doesn't exist in any domain.  Do I need to make
+@@ -252,9 +251,22 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 	}
+ 	if (name_is_local(fully_qualified_name))
+ 		err = name_bind_to_fqdn(name, fully_qualified_name, 1);
+-	else
+-		err = name_send_registration(fully_qualified_name,
+-					     name_register_cb, sock);
++	else {
++		struct in6_addr *v6_addresses;
++		__be32 *v4_addresses;
++		int num_v6_addresses;
++		int num_v4_addresses;
++
++		err = choose_addresses(&num_v6_addresses, &v6_addresses,
++				       &num_v4_addresses, &v4_addresses);
++		if (!err) {
++			/* FIXME: send addresses to register with name */
++			err = name_send_registration(fully_qualified_name,
++						     name_register_cb, sock);
++			kfree(v6_addresses);
++			kfree(v4_addresses);
++		}
++	}
+ 	if (err)
+ 		name_cache_delete(fully_qualified_name);
+ 
+diff --git a/namestack_priv.h b/namestack_priv.h
+index ade8f5b..89a5709 100644
+--- a/namestack_priv.h
++++ b/namestack_priv.h
+@@ -33,6 +33,18 @@ typedef void (*query_resolv_cb)(const __u8 *response, int len, void *data);
+ int name_send_query(const char *name, query_resolv_cb cb, void *data);
+ void name_cancel_query(void *data);
+ 
++struct inet6_ifaddr;
++struct in_ifaddr;
++
++/* Selects best addresses to use.  For now, assumes that each name should use
++ * the same heuristic for choosing an address.  Returns a list of IPv6 and
++ * IPv4 addresses, in order of preference.
++ * Returns 0 on success, an error code on failure.  On success, free the
++ * returned addresses with kfree().
++ */
++int choose_addresses(int *num_v6_addresses, struct in6_addr **v6_addresses,
++		     int *num_v4_addresses, __be32 **v4_addresses);
++
+ /* Name registration (bind()/DNS update) functions */
+ typedef void (*qualify_cb)(const char *name, void *data);
+ int name_fully_qualify(const char *name, qualify_cb cb, void *data);
+-- 
+1.6.0.4
+

@@ -1,0 +1,290 @@
+From 26db8dfb778b5fec249626af621330d5a506eb1f Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:41:44 -0700
+Subject: [PATCH] Send a resolve query to the daemon in response to a connect request
+
+---
+ af_name.c        |   17 ++++-
+ main.c           |  190 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ namestack_priv.h |    8 ++
+ 3 files changed, 212 insertions(+), 3 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 09ad8cf..168f7a8 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -62,6 +62,16 @@ static long name_wait_for_connect(struct sock *sk, long timeo)
+ 	return timeo;
+ }
+ 
++static void name_stream_query_resolve(const u_char *response, int len,
++				      void *data)
++{
++	struct socket *sock = data;
++	struct sock *sk = sock->sk;
++
++	sk->sk_state = NAME_CONNECTING;
++	/* FIXME: send off connect request here */
++}
++
+ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 			       int addr_len, int flags)
+ {
+@@ -96,10 +106,11 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 		err = -EISCONN;
+ 
+ 		sock->state = SS_CONNECTING;
+-		/* FIXME: connect is never actually attempted, need to try
+-		 * it here.
+-		 */
+ 		sk->sk_state = NAME_RESOLVING;
++		err = name_send_query(sname->sname_addr.name,
++				      name_stream_query_resolve, sock);
++		if (err)
++			goto out;
+ 
+ 		/* Just entered SS_CONNECTING state; the only
+ 		 * difference is that return value in non-blocking
+diff --git a/main.c b/main.c
+index 7766b87..837a432 100644
+--- a/main.c
++++ b/main.c
+@@ -9,6 +9,110 @@
+ static DEFINE_MUTEX(nos_mutex);
+ static struct sock *nls = NULL;
+ static int daemon_pid;
++static atomic_t req_id = ATOMIC_INIT(0);
++
++struct pending_node
++{
++	atomic_t ref;
++	__u32 seq;
++	void *cb;
++	void *data;
++	struct pending_node *next;
++};
++
++static DEFINE_SPINLOCK(pending_queue_lock);
++static struct pending_node *pending_queue = NULL;
++
++static inline void lock_pending_queue(void)
++{
++	spin_lock(&pending_queue_lock);
++}
++
++static inline void unlock_pending_queue(void)
++{
++	spin_unlock(&pending_queue_lock);
++}
++
++/* Logically inserts a new node into the pending queue.  Must *not* be called
++ * from an interrupt handler.
++ * Literally it instead looks for a node with a reference count of 0 first, and
++ * reclaims it if it finds one.  Otherwise it allocates a new node to insert
++ * into the pending queue.  This mechanism allows pending_queue_find_and_remove
++ * to avoid taking the queue lock, which is important since it's called from
++ * an irq handler.
++ */
++static int pending_queue_push(struct sk_buff *sk, __u32 seq,
++			      void *cb, void *data)
++{
++	struct pending_node *ptr, *node = NULL;
++	int err = -ENOMEM, insert = 0;
++
++	printk(KERN_INFO "pending queue is %p\n", pending_queue);
++	lock_pending_queue();
++	for (ptr = pending_queue, node = NULL; ptr && !node; ptr = ptr->next)
++		if (ptr->ref.counter == 0)
++		{
++			/* Found a node that needs to be freed, claim it */
++			ptr->ref.counter = 1;
++			node = ptr;
++		}
++	unlock_pending_queue();
++	if (!node)
++	{
++		node = kmalloc(sizeof(struct pending_node), GFP_ATOMIC);
++		if (node)
++		{
++			node->ref.counter = 1;
++			insert = 1;
++		}
++	}
++	if (node)
++	{
++		err = 0;
++		node->seq = seq;
++		node->cb = cb;
++		node->data = data;
++		if (insert)
++		{
++			lock_pending_queue();
++			node->next = pending_queue;
++			pending_queue = node;
++			unlock_pending_queue();
++		}
++	}
++	return err;
++}
++
++static struct pending_node *pending_queue_find_and_remove(__u32 seq)
++{
++	struct pending_node *node = NULL;
++
++	for (node = pending_queue; node; node = node->next)
++		if (atomic_read(&node->ref) && node->seq == seq)
++			break;
++	if (node)
++	{
++		/* "Free" the node by decrementing its reference counter.
++		 * It'll actually get freed later, in pending_queue_free.
++		 */
++		atomic_dec(&node->ref);
++	}
++	return node;
++}
++
++/* Frees any memory allocated by the pending node queue. */
++static void pending_queue_free(void)
++{
++	struct pending_node *ptr;
++
++	for (ptr = pending_queue; ptr; )
++	{
++		struct pending_node *next = ptr->next;
++
++		kfree(ptr);
++		ptr = next;
++	}
++}
+ 
+ static int
+ namestack_send_message(int pid, int type, const void *payload, int size)
+@@ -44,9 +148,38 @@ handle_register(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ static int
+ handle_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ {
++	struct pending_node *node;
++
+ 	printk("received reply message from user %d, process %d\n",
+ 		NETLINK_CREDS(skb)->uid,
+ 		NETLINK_CREDS(skb)->pid);
++	node = pending_queue_find_and_remove(nlh->nlmsg_seq);
++	if (node)
++	{
++		int len;
++
++		printk(KERN_INFO "found reply on pending queue\n");
++		if (NLMSG_PAYLOAD(nlh, 0) >= sizeof(len))
++		{
++			memcpy(&len, NLMSG_DATA(nlh), sizeof(len));
++			printk(KERN_INFO "len is %d\n", len);
++			if (NLMSG_PAYLOAD(nlh, 0) >= len + sizeof(len))
++			{
++				query_resolv_cb cb = node->cb;
++
++				cb(NLMSG_DATA(nlh) + sizeof(len), len,
++				   node->data);
++			}
++			else
++				printk(KERN_WARNING
++				       "invalid payload length in reply\n");
++		}
++		else
++			printk(KERN_WARNING
++			       "invalid payload length in reply\n");
++	}
++	else
++		printk(KERN_WARNING "reply for unknown request\n");
+ 	/* Send an empty REPLY as an ack */
+ 	return namestack_send_message(NETLINK_CREDS(skb)->pid, NAME_STACK_REPLY,
+ 		NULL, 0);
+@@ -114,8 +247,65 @@ static void __exit namestack_exit(void)
+ {
+ 	name_af_exit();
+ 	netlink_kernel_release(nls);
++	/* Only after no new requests can be received is it safe to free the
++	 * pending request queue.
++	 */
++	pending_queue_free();
+ 	printk(KERN_INFO "name-oriented stack module unloading\n");
+ }
+ 
++static int
++namestack_send_message_tracked(int pid, int type, const void *payload, int size,
++			       void *cb, void *data)
++{
++	struct sk_buff *skb;
++	int len = NLMSG_SPACE(size), seq, err;
++	struct nlmsghdr *nlh;
++
++	skb = alloc_skb(len, GFP_ATOMIC);
++	if (!skb) {
++		printk(KERN_ERR "Could not allocate skb to send message\n");
++		return -ENOMEM;
++	}
++	seq = atomic_inc_return(&req_id);
++	nlh = __nlmsg_put(skb, pid, seq, type, (len - sizeof(*nlh)), 0);
++	nlh->nlmsg_flags = 0;
++	memcpy(NLMSG_DATA(nlh), payload, size);
++	err = pending_queue_push(skb, seq, cb, data);
++	if (err) {
++		printk(KERN_ERR "Allocation failure, can't send message\n");
++		goto out;
++	}
++	err = netlink_unicast(nls, skb, pid, MSG_DONTWAIT);
++	if (err > 0) {
++		/* A positive return value indicates how many bytes were sent
++		 * successfully, which is equivalent to success since sends
++		 * aren't fragmented in any way.
++		 */
++		err = 0;
++	}
++out:
++	return err;
++}
++
++int name_send_query(const char *name, query_resolv_cb cb, void *data)
++{
++	int err;
++
++	if (!daemon_pid) {
++		printk(KERN_WARNING "no resolver daemon, unable to send query\n");
++		err = -ENOSYS;
++	}
++	else {
++		printk(KERN_INFO "resolving %s\n", name);
++		/* FIXME:  who handles retrying in case of failure? */
++		err = namestack_send_message_tracked(daemon_pid,
++						     NAME_STACK_QUERY,
++						     name, strlen(name) + 1,
++						     cb, data);
++	}
++	return err;
++}
++
+ module_init(namestack_init);
+ module_exit(namestack_exit);
+diff --git a/namestack_priv.h b/namestack_priv.h
+index 7737e10..8f1d15f 100644
+--- a/namestack_priv.h
++++ b/namestack_priv.h
+@@ -1,7 +1,15 @@
+ #ifndef NAMESTACK_PRIV_H
+ #define NAMESTACK_PRIV_H
+ 
++#include <linux/types.h>
++
++/* Registration/unregistration functions */
+ extern int name_af_init(void);
+ extern void name_af_exit(void);
+ 
++/* Name resolution functions */
++typedef void (*query_resolv_cb)(const __u8 *response, int len, void *data);
++int name_send_query(const char *name, query_resolv_cb cb, void *data);
++void name_cancel_query(void *data);
++
+ #endif /* NAMESTACK_PRIV_H */
+-- 
+1.6.0.4
+

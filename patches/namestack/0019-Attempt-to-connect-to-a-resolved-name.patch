@@ -1,0 +1,134 @@
+From c3ae58a0fa5ea8168b417fe77c3a12a45fc718b3 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:45:31 -0700
+Subject: [PATCH] Attempt to connect to a resolved name
+
+---
+ af_name.c |   58 ++++++++++++++++++++++++++++++++++++++++++++++++++--------
+ 1 files changed, 50 insertions(+), 8 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 0a38133..d7cf71e 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -1,5 +1,6 @@
+ #include <linux/types.h>
+ #include <linux/socket.h>
++#include <linux/in.h>
+ #include <linux/net.h>
+ #include <linux/module.h>
+ #include <net/sock.h>
+@@ -17,6 +18,7 @@ struct name_stream_sock
+ 	int dname_answer_len;
+ 	uint16_t dname_answer_index;
+ 	int connect_error;
++	struct socket *transport_sock;
+ };
+ 
+ static inline struct name_stream_sock *name_stream_sk(const struct sock *sk)
+@@ -41,6 +43,11 @@ static int name_stream_release(struct socket *sock)
+ 		name->dname_answer_len = 0;
+ 		name->dname_answer_index = 0;
+ 	}
++	if (name->transport_sock) {
++		kernel_sock_shutdown(name->transport_sock, SHUT_WR);
++		sock_release(name->transport_sock);
++		name->transport_sock = NULL;
++	}
+ 
+ 	sock_set_flag(sk, SOCK_DEAD);
+ 	sock->sk = NULL;
+@@ -87,9 +94,10 @@ static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
+ 					     const u_char *rdata)
+ {
+ 	struct name_stream_sock *name = name_stream_sk(sk);
++	struct sockaddr_in6 sin6;
+ 	struct in6_addr *addr;
+ 	char address[46], *p;
+-	int i, in_zero = 0;
++	int i, in_zero = 0, err;
+ 
+ 	if (rdlength != sizeof(struct in6_addr)) {
+ 		printk(KERN_WARNING
+@@ -119,15 +127,33 @@ static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
+ 		}
+ 	}
+ 	sprintf(p, "%x", ntohs(addr->s6_addr16[7]));
+-	printk(KERN_INFO "connect to IPv6 address %s\n", address);
+-	/* FIXME: placeholder */
+-	return 0;
++	printk(KERN_INFO "connect to IPv6 address %s:%d\n", address,
++	       ntohs(name->dname.sname_port));
++	err = sock_create_kern(PF_INET6, SOCK_STREAM, 0, &name->transport_sock);
++	if (err)
++		goto out;
++	memset(&sin6, 0, sizeof(sin6));
++	sin6.sin6_family = AF_INET6;
++	sin6.sin6_port = name->dname.sname_port;
++	memcpy(&sin6.sin6_addr, addr, sizeof(*addr));
++	/* FIXME: need to set name options in socket */
++	err = kernel_connect(name->transport_sock, (struct sockaddr *)&sin6,
++			     sizeof(sin6), O_NONBLOCK);
++	/* The expected error is EINPROGRESS, as the socket connection kicks
++	 * off.  Return success in this case.
++	 */
++	if (err == -EINPROGRESS)
++		err = 0;
++out:
++	return err;
+ }
+ 
+ static int name_stream_connect_to_v4_address(struct sock *sk, uint16_t rdlength,
+ 					     const u_char *rdata)
+ {
+ 	struct name_stream_sock *name = name_stream_sk(sk);
++	int err;
++	struct sockaddr_in sin;
+ 	uint32_t addr;
+ 	char address[16], *p;
+ 	const u_char *addrp;
+@@ -146,14 +172,29 @@ static int name_stream_connect_to_v4_address(struct sock *sk, uint16_t rdlength,
+ 	{
+ 		int n;
+ 
+-		sprintf(p, "%d%n\n", *addrp, &n);
++		sprintf(p, "%d%n", *addrp, &n);
+ 		p += n;
+ 		if (addrp < (u_char *)&addr + sizeof(uint32_t) - 1)
+ 			*p++ = '.';
+ 	}
+-	printk(KERN_INFO "connect to IPv4 address %s\n", address);
+-	/* FIXME: placeholder */
+-	return 0;
++	printk(KERN_INFO "connect to IPv4 address %s:%d\n", address,
++	       ntohs(name->dname.sname_port));
++	err = sock_create_kern(PF_INET, SOCK_STREAM, 0, &name->transport_sock);
++	if (err)
++		goto out;
++	memset(&sin, 0, sizeof(sin));
++	sin.sin_family = AF_INET;
++	sin.sin_port = name->dname.sname_port;
++	sin.sin_addr.s_addr = *(uint32_t *)rdata;
++	err = kernel_connect(name->transport_sock, (struct sockaddr *)&sin,
++			     sizeof(sin), O_NONBLOCK);
++	/* The expected error is EINPROGRESS, as the socket connection kicks
++	 * off.  Return success in this case.
++	 */
++	if (err == -EINPROGRESS)
++		err = 0;
++out:
++	return err;
+ }
+ 
+ static void name_stream_connect_to_resolved_name(struct sock *sk)
+@@ -365,6 +406,7 @@ static struct sock *name_alloc_stream_socket(struct net *net,
+ 	name->dname_answer_len = 0;
+ 	name->dname_answer_index = 0;
+ 	name->connect_error = 0;
++	name->transport_sock = NULL;
+ out:
+ 	return sk;
+ }
+-- 
+1.6.0.4
+

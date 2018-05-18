@@ -1,0 +1,128 @@
+From 09131807340076bf3246b6fa879d2ae8b9fb8af2 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:45:42 -0700
+Subject: [PATCH] Wake up parent socket when TCP connect completes
+
+---
+ af_name.c |   72 +++++++++++++++++++++++++++++++++++++++++++++++-------------
+ 1 files changed, 56 insertions(+), 16 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index d7cf71e..8197719 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -4,11 +4,28 @@
+ #include <linux/net.h>
+ #include <linux/module.h>
+ #include <net/sock.h>
++#include <net/tcp_states.h>
+ #include <linux/inname.h>
+ #include "dns.h"
+ #include "nameser.h"
+ #include "namestack_priv.h"
+ 
++enum {
++	NAME_CLOSED = 1,
++	NAME_RESOLVING,
++	NAME_CONNECTING,
++	NAME_LISTEN,
++	NAME_ESTABLISHED,
++};
++
++enum {
++	NAMEF_CLOSED      = (1 << NAME_CLOSED),
++	NAMEF_RESOLVING   = (1 << NAME_RESOLVING),
++	NAMEF_CONNECTING  = (1 << NAME_CONNECTING),
++	NAMEF_LISTEN      = (1 << NAME_LISTEN),
++	NAMEF_ESTABLISHED = (1 << NAME_ESTABLISHED),
++};
++
+ struct name_stream_sock
+ {
+ 	struct sock sk;
+@@ -26,6 +43,41 @@ static inline struct name_stream_sock *name_stream_sk(const struct sock *sk)
+ 	return (struct name_stream_sock *)sk;
+ }
+ 
++static void name_stream_state_change(struct sock *sk)
++{
++	struct name_stream_sock *name;
++
++	read_lock(&sk->sk_callback_lock);
++	if (!(name = sk->sk_user_data))
++		goto out;
++
++	printk(KERN_INFO "sk_state is %d\n", sk->sk_state);
++	switch (sk->sk_state) {
++	case TCP_ESTABLISHED:
++		name->sk.sk_state = NAME_ESTABLISHED;
++		name->sk.sk_state_change(&name->sk);
++		break;
++	case TCP_FIN_WAIT1:
++		/* The client initiated a shutdown of the socket */
++		break;
++	case TCP_CLOSE_WAIT:
++		/* The server initiated a shutdown of the socket */
++	case TCP_SYN_SENT:
++	case TCP_CLOSING:
++		/*
++		 * If the server closed down the connection, make sure that
++		 * we back off before reconnecting
++		 */
++		break;
++	case TCP_LAST_ACK:
++		break;
++	case TCP_CLOSE:
++		break;
++	}
++ out:
++	read_unlock(&sk->sk_callback_lock);
++}
++
+ static int name_stream_release(struct socket *sock)
+ {
+ 	struct sock *sk = sock->sk;
+@@ -57,22 +109,6 @@ out:
+ 	return 0;
+ }
+ 
+-enum {
+-	NAME_CLOSED = 1,
+-	NAME_RESOLVING,
+-	NAME_CONNECTING,
+-	NAME_LISTEN,
+-	NAME_ESTABLISHED,
+-};
+-
+-enum {
+-	NAMEF_CLOSED      = (1 << NAME_CLOSED),
+-	NAMEF_RESOLVING   = (1 << NAME_RESOLVING),
+-	NAMEF_CONNECTING  = (1 << NAME_CONNECTING),
+-	NAMEF_LISTEN      = (1 << NAME_LISTEN),
+-	NAMEF_ESTABLISHED = (1 << NAME_ESTABLISHED),
+-};
+-
+ static long name_wait_for_connect(struct sock *sk, long timeo)
+ {
+ 	DEFINE_WAIT(wait);
+@@ -132,6 +168,8 @@ static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
+ 	err = sock_create_kern(PF_INET6, SOCK_STREAM, 0, &name->transport_sock);
+ 	if (err)
+ 		goto out;
++	name->transport_sock->sk->sk_user_data = name;
++	name->transport_sock->sk->sk_state_change = name_stream_state_change;
+ 	memset(&sin6, 0, sizeof(sin6));
+ 	sin6.sin6_family = AF_INET6;
+ 	sin6.sin6_port = name->dname.sname_port;
+@@ -182,6 +220,8 @@ static int name_stream_connect_to_v4_address(struct sock *sk, uint16_t rdlength,
+ 	err = sock_create_kern(PF_INET, SOCK_STREAM, 0, &name->transport_sock);
+ 	if (err)
+ 		goto out;
++	name->transport_sock->sk->sk_user_data = name;
++	name->transport_sock->sk->sk_state_change = name_stream_state_change;
+ 	memset(&sin, 0, sizeof(sin));
+ 	sin.sin_family = AF_INET;
+ 	sin.sin_port = name->dname.sname_port;
+-- 
+1.6.0.4
+

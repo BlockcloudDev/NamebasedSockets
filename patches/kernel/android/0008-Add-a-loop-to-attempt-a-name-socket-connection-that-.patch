@@ -1,0 +1,120 @@
+From 1eae5e0038559f6664417db62a63143f780dfa68 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:41:31 -0700
+Subject: [PATCH 08/67] Add a loop to attempt a name socket connection (that doesn't attempt the connection yet)
+
+---
+ net/namestack/af_name.c |   84 ++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 83 insertions(+), 1 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 4ded1e6..09ad8cf 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -31,11 +31,44 @@ out:
+ 	return 0;
+ }
+ 
++enum {
++	NAME_RESOLVING = 1,
++	NAME_CONNECTING,
++	NAME_LISTEN,
++	NAME_ESTABLISHED,
++};
++
++enum {
++	NAMEF_RESOLVING   = (1 << NAME_RESOLVING),
++	NAMEF_CONNECTING  = (1 << NAME_CONNECTING),
++	NAMEF_LISTEN      = (1 << NAME_LISTEN),
++	NAMEF_ESTABLISHED = (1 << NAME_ESTABLISHED),
++};
++
++static long name_wait_for_connect(struct sock *sk, long timeo)
++{
++	DEFINE_WAIT(wait);
++
++	prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
++	while ((1 << sk->sk_state) & (NAMEF_RESOLVING | NAMEF_CONNECTING)) {
++		release_sock(sk);
++		timeo = schedule_timeout(timeo);
++		lock_sock(sk);
++		if (signal_pending(current) || !timeo)
++			break;
++		prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
++	}
++	finish_wait(sk->sk_sleep, &wait);
++	return timeo;
++}
++
+ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 			       int addr_len, int flags)
+ {
+ 	struct sockaddr_name *sname = (struct sockaddr_name *)uaddr;
+ 	int err;
++	struct sock *sk;
++	long timeo;
+ 
+ 	if (addr_len < sizeof(struct sockaddr_name))
+ 		return -EINVAL;
+@@ -44,8 +77,57 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 
+ 	printk(KERN_INFO "name_stream_connect requested to %s\n",
+ 	       sname->sname_addr.name);
+-	err = -EINPROGRESS;
+ 
++	sk = sock->sk;
++	lock_sock(sk);
++
++	switch (sock->state) {
++	default:
++		err = -EINVAL;
++		goto out;
++	case SS_CONNECTED:
++		err = -EISCONN;
++		goto out;
++	case SS_CONNECTING:
++		err = -EALREADY;
++		/* Fall out of switch with err, set for this state */
++		break;
++	case SS_UNCONNECTED:
++		err = -EISCONN;
++
++		sock->state = SS_CONNECTING;
++		/* FIXME: connect is never actually attempted, need to try
++		 * it here.
++		 */
++		sk->sk_state = NAME_RESOLVING;
++
++		/* Just entered SS_CONNECTING state; the only
++		 * difference is that return value in non-blocking
++		 * case is EINPROGRESS, rather than EALREADY.
++		 */
++		err = -EINPROGRESS;
++		break;
++	}
++
++	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
++	if ((1 << sk->sk_state) & (NAMEF_RESOLVING | NAMEF_CONNECTING)) {
++		if (!timeo || !name_wait_for_connect(sk, timeo)) {
++			/* err set above */
++			goto out;
++		}
++		err = sock_intr_errno(timeo);
++		if (signal_pending(current))
++			goto out;
++	}
++
++	/* FIXME: connection may have been closed externally, need to check
++	 * state.
++	 */
++	sock->state = SS_CONNECTED;
++	err = 0;
++
++out:
++	release_sock(sk);
+ 	return err;
+ }
+ 
+-- 
+1.6.3.2
+

@@ -1,0 +1,411 @@
+From 65b5d9493d91b3ce4f727c71598fffe5a147500c Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:44:28 -0700
+Subject: [PATCH 14/67] Begin to parse name resolution responses in preparation for attempting connecting
+
+---
+ net/namestack/Makefile  |    2 +-
+ net/namestack/af_name.c |   28 ++++++++-
+ net/namestack/dns.c     |  168 +++++++++++++++++++++++++++++++++++++++++++++++
+ net/namestack/dns.h     |   58 ++++++++++++++++
+ net/namestack/nameser.h |   84 +++++++++++++++++++++++
+ 5 files changed, 338 insertions(+), 2 deletions(-)
+ create mode 100644 net/namestack/dns.c
+ create mode 100644 net/namestack/dns.h
+ create mode 100644 net/namestack/nameser.h
+
+diff --git a/net/namestack/Makefile b/net/namestack/Makefile
+index 619d04a..3eff6af 100644
+--- a/net/namestack/Makefile
++++ b/net/namestack/Makefile
+@@ -1,5 +1,5 @@
+ obj-m += namestack.o
+-namestack-objs := main.o af_name.o
++namestack-objs := main.o af_name.o dns.o
+ 
+ # ordinary compiles:
+ #KERN_BUILD := /lib/modules/$(shell uname -r)/build
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 903db2a..aa63cf9 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -4,6 +4,8 @@
+ #include <linux/module.h>
+ #include <net/sock.h>
+ #include <linux/inname.h>
++#include "dns.h"
++#include "nameser.h"
+ #include "namestack_priv.h"
+ 
+ struct name_stream_sock
+@@ -78,6 +80,30 @@ static long name_wait_for_connect(struct sock *sk, long timeo)
+ 	return timeo;
+ }
+ 
++static void name_stream_connect_to_resolved_name(struct sock *sk)
++{
++	struct name_stream_sock *name = name_stream_sk(sk);
++	uint16_t rdlength;
++	const u_char *rdata;
++
++	if (!find_answer_of_type(name->dname_answer, name->dname_answer_len,
++				 T_AAAA, 0, &rdlength, &rdata)) {
++		/* FIXME: placeholder */
++		printk(KERN_INFO "connect to IPv6 address\n");
++	}
++	else if (!find_answer_of_type(name->dname_answer,
++				      name->dname_answer_len,
++				      T_A, 0, &rdlength, &rdata)) {
++		/* FIXME: placeholder */
++		printk(KERN_INFO "connect to IPv4 address\n");
++	}
++	else {
++		printk(KERN_WARNING "no supported address type found\n");
++		sk->sk_state = NAME_CLOSED;
++		sk->sk_state_change(sk);
++	}
++}
++
+ static void name_stream_query_resolve(const u_char *response, int len,
+ 				      void *data)
+ {
+@@ -101,7 +127,7 @@ static void name_stream_query_resolve(const u_char *response, int len,
+ 			memcpy(name->dname_answer, response, len);
+ 			sk->sk_state = NAME_CONNECTING;
+ 			sk->sk_state_change(sk);
+-			/* FIXME: send off connect request here */
++			name_stream_connect_to_resolved_name(sk);
+ 		}
+ 	}
+ 	else
+diff --git a/net/namestack/dns.c b/net/namestack/dns.c
+new file mode 100644
+index 0000000..a3bbed9
+--- /dev/null
++++ b/net/namestack/dns.c
+@@ -0,0 +1,168 @@
++#include "dns.h"
++#ifdef __KERNEL__
++#include <linux/in.h>
++#include "nameser.h"
++#else
++#include <string.h> /* NULL */
++#define BIND_8_COMPAT
++#include <arpa/nameser.h>
++#endif /* __KERNEL__ */
++
++uint16_t advance_name(const u_char *ptr, const u_char *start, uint16_t len)
++{
++	int has_pointer = 0;
++	const u_char *original_ptr = ptr;
++
++	for (; ptr - start < len; )
++	{
++		if ((*ptr & 0xc0) == 0xc0)
++		{
++			has_pointer = 1;
++			ptr += sizeof(uint16_t);
++			/* A pointer always terminates this loop */
++			break;
++		}
++		else
++		{
++			u_char label_len = *ptr;
++
++			ptr += label_len + 1;
++			if (!label_len)
++			{
++				/* An empty label indicates the end of the name
++				 */
++				break;
++			}
++		}
++	}
++	return ptr - original_ptr;
++}
++
++int parse_rr(const u_char *ptr, const u_char *start, uint16_t len,
++			 uint16_t *ptype, uint16_t *pclass, uint32_t *pttl,
++			 uint16_t *prdlength, const u_char **prdata)
++{
++	const u_char *original_ptr = ptr;
++	int overrun = 0;
++	uint16_t rdlength;
++
++	ptr += advance_name(ptr, start, len);
++
++	if (ptr - original_ptr + sizeof(uint16_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (ptype)
++		*ptype = htons(*(uint16_t *)ptr);
++	ptr += sizeof(uint16_t);
++
++	if (ptr - original_ptr + sizeof(uint16_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (pclass)
++		*pclass = htons(*(uint16_t *)ptr);
++	ptr += sizeof(uint16_t);
++
++	if (ptr - original_ptr + sizeof(uint32_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (pttl)
++		*pttl = htonl(*(uint32_t *)ptr);
++	ptr += sizeof(uint32_t);
++
++	if (ptr - original_ptr + sizeof(uint16_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	rdlength = htons(*(uint16_t *)ptr);
++	if (prdlength)
++		*prdlength = rdlength;
++	ptr += sizeof(uint16_t);
++
++	if (ptr - original_ptr + rdlength > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (prdata)
++		*prdata = ptr;
++out:
++	return overrun;
++}
++
++int find_answer_of_type(const u_char *ptr, uint16_t len, uint16_t t,
++			uint16_t n, uint16_t *prdlength, const u_char **prdata)
++{
++	const u_char *original_ptr = ptr;
++	const HEADER *header = (const HEADER *)ptr;
++	uint16_t qdcount, ancount;
++	int i, matching_answers, overrun = 0;
++
++	if (len < sizeof(HEADER))
++	{
++		overrun = 1;
++		goto out;
++	}
++	qdcount = ntohs(header->qdcount);
++	ancount = ntohs(header->ancount);
++	/* Advance past questions */
++	ptr += sizeof(HEADER);
++	for (i = 0; i < qdcount; i++)
++	{
++		ptr += advance_name(ptr, original_ptr, len);
++		if (ptr - original_ptr + sizeof(uint16_t) > len)
++		{
++			overrun = 1;
++			goto out;
++		}
++				ptr += sizeof(uint16_t);
++		if (ptr - original_ptr + sizeof(uint16_t) > len)
++		{
++			overrun = 1;
++			goto out;
++		}
++				ptr += sizeof(uint16_t);
++	}
++	/* Walk through answers, looking for nth instance of type t */
++	for (i = 0, matching_answers = 0; i < ancount; i++)
++	{
++		uint16_t type, rdlength;
++		const u_char *rdata;
++
++		overrun = parse_rr(ptr, original_ptr, len, &type, NULL, NULL,
++				   &rdlength, &rdata);
++		if (!overrun)
++		{
++			ptr = rdata + rdlength;
++			if (type == t)
++			{
++				if (matching_answers == n)
++				{
++					/* Found the desired instance */
++					if (prdlength)
++						*prdlength = rdlength;
++					if (prdata)
++						*prdata = rdata;
++					break;
++				}
++				else
++					matching_answers++;
++			}
++		}
++	}
++	if (!overrun && i >= ancount)
++	{
++		/* This isn't really an overrun, but the desired instance
++		 * wasn't found.
++		 */
++		overrun = 1;
++	}
++out:
++	return overrun;
++}
+diff --git a/net/namestack/dns.h b/net/namestack/dns.h
+new file mode 100644
+index 0000000..c5491bc
+--- /dev/null
++++ b/net/namestack/dns.h
+@@ -0,0 +1,58 @@
++#ifndef __DNS_H__
++#define __DNS_H__
++
++#ifdef __KERNEL__
++#include <linux/types.h>
++#else
++#include <sys/types.h>
++#include <netinet/in.h>
++#endif
++
++/* The format of a resource record (RR) is defined in RFC 1035, section 3.2.1,
++ * as:
++ * (bit offset)
++ *                1
++ * 0              5
++ * +--------------+
++ * /     NAME     /
++ * +--------------+
++ * |     TYPE     |
++ * +--------------+
++ * |    CLASS     |
++ * +--------------+
++ * |      TTL     |
++ * |              |
++ * +--------------+
++ * | RDLENGTH     |
++ * +--------------+
++ * /    RDATA     /
++ * +--------------+
++ */
++
++/* Returns the number of bytes in the name beginning at ptr.
++ * start is the beginning of the message (not the name!), and len is
++ * the message's length in bytes.  (These are used as a failsafe, to terminate
++ * parsing a malformed name.)
++ */
++uint16_t advance_name(const u_char *ptr, const u_char *start, uint16_t len);
++
++/* Parses an RR, beginning at ptr, into its type, class, ttl, rdlength, and
++ * rdata.
++ * Returns 0 if the parsed RR is sane, nonzero otherwise.
++ */
++int parse_rr(const u_char *ptr, const u_char *start, uint16_t len,
++             uint16_t *ptype, uint16_t *pclass, uint32_t *pttl,
++             uint16_t *prdlength, const u_char **prdata);
++
++/* Given a DNS response in ptr, with length len, finds the nth answer of type t
++ * in the response.  If it's found, returns a pointer to its data (in *prdata)
++ * and the length of that data (in *prdlength), and returns 0.  If it isn't
++ * found, returns nonzero.
++ * This is meant to be called in a loop, with n = 0 for the first iteration of
++ * the loop, n = 1 for the second iteration, until find_answer_of_type returns
++ * a nonzero value.
++ */
++int find_answer_of_type(const u_char *ptr, uint16_t len, uint16_t t,
++			uint16_t n, uint16_t *prdlength, const u_char **prdata);
++
++#endif
+diff --git a/net/namestack/nameser.h b/net/namestack/nameser.h
+new file mode 100644
+index 0000000..f6d0843
+--- /dev/null
++++ b/net/namestack/nameser.h
+@@ -0,0 +1,84 @@
++/* Copyright (c) 1983, 1989
++ *    The Regents of the University of California.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 4. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*%
++ *      from nameser.h	8.1 (Berkeley) 6/2/93
++ *	$BINDId: nameser_compat.h,v 8.11 1999/01/02 08:00:58 vixie Exp $
++ */
++
++#ifndef __NAMESER_H__
++#define	__NAMESER_H__
++
++/*%
++ * Structure for query header.  The order of the fields is machine- and
++ * compiler-dependent, depending on the byte/bit order and the layout
++ * of bit fields.  We use bit fields only in int variables, as this
++ * is all ANSI requires.  This requires a somewhat confusing rearrangement.
++ */
++
++typedef struct {
++	unsigned	id :16;		/*%< query identification number */
++#ifdef __BIG_ENDIAN
++			/* fields in third byte */
++	unsigned	qr: 1;		/*%< response flag */
++	unsigned	opcode: 4;	/*%< purpose of message */
++	unsigned	aa: 1;		/*%< authoritive answer */
++	unsigned	tc: 1;		/*%< truncated message */
++	unsigned	rd: 1;		/*%< recursion desired */
++			/* fields in fourth byte */
++	unsigned	ra: 1;		/*%< recursion available */
++	unsigned	unused :1;	/*%< unused bits (MBZ as of 4.9.3a3) */
++	unsigned	ad: 1;		/*%< authentic data from named */
++	unsigned	cd: 1;		/*%< checking disabled by resolver */
++	unsigned	rcode :4;	/*%< response code */
++#endif
++#ifdef __LITTLE_ENDIAN
++			/* fields in third byte */
++	unsigned	rd :1;		/*%< recursion desired */
++	unsigned	tc :1;		/*%< truncated message */
++	unsigned	aa :1;		/*%< authoritive answer */
++	unsigned	opcode :4;	/*%< purpose of message */
++	unsigned	qr :1;		/*%< response flag */
++			/* fields in fourth byte */
++	unsigned	rcode :4;	/*%< response code */
++	unsigned	cd: 1;		/*%< checking disabled by resolver */
++	unsigned	ad: 1;		/*%< authentic data from named */
++	unsigned	unused :1;	/*%< unused bits (MBZ as of 4.9.3a3) */
++	unsigned	ra :1;		/*%< recursion available */
++#endif
++			/* remaining bytes */
++	unsigned	qdcount :16;	/*%< number of question entries */
++	unsigned	ancount :16;	/*%< number of answer entries */
++	unsigned	nscount :16;	/*%< number of authority entries */
++	unsigned	arcount :16;	/*%< number of resource entries */
++} HEADER;
++
++#define T_A     1
++#define T_AAAA 28
++
++#endif /* __NAMESER_H__ */
+-- 
+1.6.3.2
+

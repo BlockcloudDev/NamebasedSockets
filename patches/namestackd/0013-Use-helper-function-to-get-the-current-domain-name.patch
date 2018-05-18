@@ -1,0 +1,117 @@
+From 59fecbb604c89689007eb27647f385ec1b3c8c84 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:33:37 -0700
+Subject: [PATCH 13/21] Use helper function to get the current domain name
+
+---
+ daemon.c |   64 +++++++++++++++++++++++++++++++++++++++++++++++--------------
+ 1 files changed, 49 insertions(+), 15 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index 0e59c5e..e9a9804 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -268,6 +268,16 @@ static void send_qualify_response(unsigned int seq, const char *registered_name)
+ 	}
+ }
+ 
++static const char *get_current_domain(void)
++{
++#ifndef ANDROID
++	return _res.defdname;
++#else
++	fprintf(stderr, "getting current domain unimplemented!\n");
++	return NULL;
++#endif
++}
++
+ static void do_qualify(unsigned int seq, const char *data, size_t len)
+ {
+ 	size_t measured_len;
+@@ -293,13 +303,18 @@ static void do_qualify(unsigned int seq, const char *data, size_t len)
+ 			}
+ 			else
+ 			{
+-				if (strlen(name) + strlen(_res.defdname) + 1 <
++				const char *domain = get_current_domain();
++
++				if (!domain)
++					fprintf(stderr,
++						"no current domain, unable to qualify\n");
++				else if (strlen(name) + strlen(domain) + 1 <
+ 				    MAX_NAME_LEN)
+ 				{
+ 					char full_name[MAX_NAME_LEN];
+ 
+ 					sprintf(full_name, "%s.%s.", name,
+-						_res.defdname);
++						domain);
+ 					send_qualify_response(seq, full_name);
+ 				}
+ 				else
+@@ -364,18 +379,31 @@ static void *register_thread(void *arg)
+ 	}
+ 	else
+ 	{
+-		printf("unqualified name %s, registering in domain %s\n",
+-		       data->name, _res.defdname);
+-		if (strlen(data->name) + strlen(_res.defdname) + 1 <
+-		    MAX_NAME_LEN)
++		const char *domain = get_current_domain();
++
++		if (!domain)
+ 		{
+-			/* FIXME: actually register name, wait for response */
+-			sprintf(registered_name, "%s.%s", data->name,
+-				_res.defdname);
+-			err = 0;
++			fprintf(stderr,
++				"no current domain, unable to register\n");
++			err = EADDRNOTAVAIL;
+ 		}
+ 		else
+-			err = ENAMETOOLONG;
++		{
++			printf("unqualified name %s, registering in domain %s\n",
++			       data->name, domain);
++			if (strlen(data->name) + strlen(domain) + 1 <
++			    MAX_NAME_LEN)
++			{
++				/* FIXME: actually register name, wait for
++				 * response
++				 */
++				sprintf(registered_name, "%s.%s", data->name,
++					domain);
++				err = 0;
++			}
++			else
++				err = ENAMETOOLONG;
++		}
+ 	}
+ 
+ 	msg_len = 2 * sizeof(int);
+@@ -558,11 +586,17 @@ static void *delete_registration_thread(void *arg)
+ 	}
+ 	else
+ 	{
+-		printf("unqualified name %s, deleting from domain %s\n",
+-		       name, _res.defdname);
+-		if (strlen(name) + strlen(_res.defdname) + 1 < MAX_NAME_LEN)
++		const char *domain = get_current_domain();
++
++		if (domain)
+ 		{
+-			/* FIXME: actually delete the name registration */
++			printf("unqualified name %s, deleting from domain %s\n",
++			       name, domain);
++			if (strlen(name) + strlen(domain) + 1 < MAX_NAME_LEN)
++			{
++				/* FIXME: actually delete the name registration
++				 */
++			}
+ 		}
+ 	}
+ 
+-- 
+1.6.3.2
+

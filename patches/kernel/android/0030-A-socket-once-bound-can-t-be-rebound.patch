@@ -1,0 +1,29 @@
+From 1cd9d688b73df5061c0b73665a4d88683f165b75 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:47:46 -0700
+Subject: [PATCH 30/67] A socket, once bound, can't be rebound
+
+---
+ net/namestack/af_name.c |    6 ++++++
+ 1 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index d65c505..343cc08 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -186,6 +186,12 @@ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 		break;
+ 	};
+ 
++	if (name->sname.sname_addr.name[0]) {
++		/* This socket is already bound. */
++		err = -EINVAL;
++		goto out;
++	}
++
+ 	/* FIXME: the address(es) to which the name should be bound should
+ 	 * also be included in the request.  Note that the request is
+ 	 * stateless:  if the addresses change, a new request can be sent, and
+-- 
+1.6.3.2
+

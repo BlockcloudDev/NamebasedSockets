@@ -1,0 +1,27 @@
+From c8a0ed60a703fa31bbe6f1cd91eeb0ac2e88d194 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:09:32 -0700
+Subject: [PATCH] Set name option on listening IPv6 socket
+
+---
+ af_name.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index a342579..d41d7cf 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -387,6 +387,10 @@ static int name_create_v6_sock(int type, int protocol, struct socket **sock,
+ 	int err = sock_create_kern(PF_INET6, type, protocol, sock);
+ 
+ 	if (!err) {
++		err = set_name_option(*sock, name->sname.sname_addr.name,
++				      NAME_OPTION_SOURCE_NAME);
++	}
++	if (!err) {
+ 		int on = 1;
+ 
+ 		err = kernel_setsockopt(*sock, IPPROTO_IPV6, IPV6_V6ONLY,
+-- 
+1.6.0.4
+

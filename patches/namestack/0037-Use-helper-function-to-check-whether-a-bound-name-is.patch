@@ -1,0 +1,67 @@
+From b410b4d85a9cc0bfdc61157e1b235a3ab0ccd271 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:49:56 -0700
+Subject: [PATCH] Use helper function to check whether a bound name is in the localhost domain
+
+---
+ af_name.c |   24 +++++++++++++++++-------
+ 1 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 320021f..81db3d0 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -156,13 +156,27 @@ static void name_register_cb(int result, const char *bound_name, void *data)
+ 	name->async_error = -result;
+ }
+ 
++static int name_is_local(const char *name)
++{
++	const char *p;
++
++	//assert(strlen(name) > 1);
++	p = name + strlen(name) - 1;
++	if (*p != '.')
++		return 0;
++	for (p = p - 1; *p != '.' && p >= name; p--)
++		;
++	if (p == name)
++		return 0;
++	return !strcasecmp(p + 1, "localhost.");
++}
++
+ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 			__be16 port)
+ {
+ 	struct sock *sk = sock->sk;
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+ 	int err;
+-	const char *p;
+ 
+ 	printk(KERN_INFO "name qualified as %s\n", fully_qualified_name);
+ 	strcpy(name->sname.sname_addr.name, fully_qualified_name);
+@@ -172,11 +186,7 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 		goto out;
+ 	/* FIXME: need to select addresses to register for name */
+ 	//assert(strlen(fully_qualified_name) > 1);
+-	p = fully_qualified_name + strlen(fully_qualified_name) - 1;
+-	//assert(*p == '.');
+-	for (p = p - 1; *p != '.' && p >= fully_qualified_name; p--)
+-		;
+-	if (p == fully_qualified_name) {
++	if (!strchr(fully_qualified_name, '.')) {
+ 		/* FIXME: name doesn't exist in any domain.  Do I need to make
+ 		 * a canonical name out of it?
+ 		 */
+@@ -184,7 +194,7 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 		err = -EINVAL;
+ 		goto out;
+ 	}
+-	if (!strcmp(p + 1, "localhost."))
++	if (name_is_local(fully_qualified_name))
+ 		err = name_bind_to_fqdn(name, fully_qualified_name, 1);
+ 	else
+ 		err = name_send_registration(fully_qualified_name,
+-- 
+1.6.0.4
+

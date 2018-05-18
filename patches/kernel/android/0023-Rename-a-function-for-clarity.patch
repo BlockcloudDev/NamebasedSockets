@@ -1,0 +1,34 @@
+From 3cbf3d0da734841ea2069df0bf86e9a9de6e3979 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:46:15 -0700
+Subject: [PATCH 23/67] Rename a function for clarity
+
+---
+ net/namestack/main.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/net/namestack/main.c b/net/namestack/main.c
+index dafb9af..13e95fc 100644
+--- a/net/namestack/main.c
++++ b/net/namestack/main.c
+@@ -146,7 +146,7 @@ handle_register(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ }
+ 
+ static int
+-handle_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
++handle_name_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ {
+ 	struct pending_node *node;
+ 
+@@ -195,7 +195,7 @@ nos_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+ 		err = handle_register(skb, nlh);
+ 		break;
+ 	case NAME_STACK_NAME_REPLY:
+-		err = handle_reply(skb, nlh);
++		err = handle_name_reply(skb, nlh);
+ 		break;
+ 	default:
+ 		err = -ENOSYS;
+-- 
+1.6.3.2
+

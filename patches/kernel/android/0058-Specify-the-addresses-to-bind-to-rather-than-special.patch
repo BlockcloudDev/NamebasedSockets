@@ -1,0 +1,144 @@
+From 9159b02d88637aaa5950d54e15cf5ea66f8fb08c Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:13:57 -0700
+Subject: [PATCH 58/67] Specify the addresses to bind to rather than special-casing loopback addresses
+
+---
+ net/namestack/af_name.c |   77 +++++++++++++++++++++++++----------------------
+ 1 files changed, 41 insertions(+), 36 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index a4407a0..40d4c57 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -158,28 +158,25 @@ out:
+ 	return 0;
+ }
+ 
+-static int name_bind_ipv4(struct socket *sock, __be16 port, int local)
++static int name_bind_ipv4(struct socket *sock, const __be32 *addr, __be16 port)
+ {
+ 	struct sockaddr_in sin;
+ 
+ 	memset(&sin, 0, sizeof(sin));
+-	if (local)
+-		sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++	if (addr)
++		memcpy(&sin.sin_addr.s_addr, addr, sizeof(*addr));
+ 	sin.sin_port = port;
+ 	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
+ }
+ 
+-static int name_bind_ipv6(struct socket *sock, const char *fqdn, __be16 port,
+-			  int local)
++static int name_bind_ipv6(struct socket *sock, const char *fqdn,
++			  const struct in6_addr *addr, __be16 port)
+ {
+ 	struct sockaddr_in6 sin;
+ 
+ 	memset(&sin, 0, sizeof(sin));
+-	if (local) {
+-		__u8 loopback[16] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 };
+-
+-		memcpy(&sin.sin6_addr, &loopback, sizeof(sin.sin6_addr));
+-	}
++	if (addr)
++		memcpy(&sin.sin6_addr, addr, sizeof(sin.sin6_addr));
+ 	sin.sin6_port = port;
+ 	/* FIXME: need to tie the fqdn to the socket somehow, but how? */
+ 	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
+@@ -715,40 +712,43 @@ static int name_create_v4_sock(int type, int protocol, struct socket **sock,
+ }
+ 
+ static int name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn,
+-			     int local)
++			     const __be32 *v4addr,
++			     const struct in6_addr *v6addr)
+ {
+-	int err;
++	int err = 0;
+ 
+ 	printk(KERN_INFO "bound to %s\n", fqdn);
+-	/* If a particular port is specified, bind() must fail if the port is
+-	 * unavailable, hence we must create the transport sockets if they
+-	 * don't already exist so we may attempt to bind to the specified port.
+-	 * If no port is specified, name_register() has already checked that
+-	 * the name is available, so bind() succeeds without needing to create
+-	 * the sockets yet.  (The sockets will be created as necessary during
+-	 * connect() or listen().)
++	/* If a particular port or address is specified, bind() must fail if
++	 * the port or address is unavailable, hence we must create the
++	 * transport sockets if they don't already exist so we may attempt to
++	 * bind to the specified address and port.  If no address or port is
++	 * specified, name_register() has already checked that the name is
++	 * available, so bind() succeeds without needing to create the sockets
++	 * yet.  (The sockets will be created as necessary during connect() or
++	 * listen().)
+ 	 */
+-	if (name->sname.sname_port) {
+-		if (!name->ipv6_sock) {
+-			err = name_create_v6_sock(SOCK_STREAM, 0,
+-						  &name->ipv6_sock, name);
+-			if (err)
+-				goto out;
+-		}
++	if (name->sname.sname_port || v4addr) {
+ 		if (!name->ipv4_sock) {
+ 			err = name_create_v4_sock(SOCK_STREAM, 0,
+ 						  &name->ipv4_sock, name);
+ 			if (err)
+ 				goto out;
+ 		}
+-		err = name_bind_ipv6(name->ipv6_sock, fqdn,
+-				     name->sname.sname_port, local);
+-		if (!err)
+-			err = name_bind_ipv4(name->ipv4_sock,
+-					     name->sname.sname_port, local);
++		err = name_bind_ipv4(name->ipv4_sock, v4addr,
++				     name->sname.sname_port);
++		if (err)
++			goto out;
++	}
++	if (name->sname.sname_port || v6addr) {
++		if (!name->ipv6_sock) {
++			err = name_create_v6_sock(SOCK_STREAM, 0,
++						  &name->ipv6_sock, name);
++			if (err)
++				goto out;
++		}
++		err = name_bind_ipv6(name->ipv6_sock, fqdn, v6addr,
++				     name->sname.sname_port);
+ 	}
+-	else
+-		err = 0;
+ out:
+ 	return err;
+ }
+@@ -760,7 +760,7 @@ static void name_register_cb(int result, const char *bound_name, void *data)
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+ 
+ 	if (!result)
+-		result = name_bind_to_fqdn(name, bound_name, 0);
++		result = name_bind_to_fqdn(name, bound_name, NULL, NULL);
+ 	sk->sk_state &= ~NAMEF_BINDING;
+ 	name->async_error = -result;
+ }
+@@ -787,8 +787,13 @@ static int name_register(struct socket *sock, const char *fully_qualified_name,
+ 		err = -EINVAL;
+ 		goto out;
+ 	}
+-	if (name_is_local(fully_qualified_name))
+-		err = name_bind_to_fqdn(name, fully_qualified_name, 1);
++	if (name_is_local(fully_qualified_name)) {
++		__be32 v4loopback = htonl(INADDR_LOOPBACK);
++		struct in6_addr v6loopback = { { { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 } } };
++
++		err = name_bind_to_fqdn(name, fully_qualified_name, &v4loopback,
++					&v6loopback);
++	}
+ 	else {
+ 		struct in6_addr *v6_addresses;
+ 		__be32 *v4_addresses;
+-- 
+1.6.3.2
+

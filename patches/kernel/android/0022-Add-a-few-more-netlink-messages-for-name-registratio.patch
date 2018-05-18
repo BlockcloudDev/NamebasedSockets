@@ -1,0 +1,64 @@
+From 241eb3489b280e425180d683a4a59fe52f7ada3b Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:46:03 -0700
+Subject: [PATCH 22/67] Add a few more netlink messages for name registration
+
+---
+ net/namestack/main.c        |    8 ++++----
+ net/namestack/namestacknl.h |    7 +++++--
+ 2 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/net/namestack/main.c b/net/namestack/main.c
+index 837a432..dafb9af 100644
+--- a/net/namestack/main.c
++++ b/net/namestack/main.c
+@@ -181,8 +181,8 @@ handle_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ 	else
+ 		printk(KERN_WARNING "reply for unknown request\n");
+ 	/* Send an empty REPLY as an ack */
+-	return namestack_send_message(NETLINK_CREDS(skb)->pid, NAME_STACK_REPLY,
+-		NULL, 0);
++	return namestack_send_message(NETLINK_CREDS(skb)->pid,
++		NAME_STACK_NAME_REPLY, NULL, 0);
+ }
+ 
+ static int
+@@ -194,7 +194,7 @@ nos_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+ 	case NAME_STACK_REGISTER:
+ 		err = handle_register(skb, nlh);
+ 		break;
+-	case NAME_STACK_REPLY:
++	case NAME_STACK_NAME_REPLY:
+ 		err = handle_reply(skb, nlh);
+ 		break;
+ 	default:
+@@ -300,7 +300,7 @@ int name_send_query(const char *name, query_resolv_cb cb, void *data)
+ 		printk(KERN_INFO "resolving %s\n", name);
+ 		/* FIXME:  who handles retrying in case of failure? */
+ 		err = namestack_send_message_tracked(daemon_pid,
+-						     NAME_STACK_QUERY,
++						     NAME_STACK_NAME_QUERY,
+ 						     name, strlen(name) + 1,
+ 						     cb, data);
+ 	}
+diff --git a/net/namestack/namestacknl.h b/net/namestack/namestacknl.h
+index 145bdd2..a0747b1 100644
+--- a/net/namestack/namestacknl.h
++++ b/net/namestack/namestacknl.h
+@@ -8,8 +8,11 @@ enum {
+      * vice-versa.  Should I separate message types by the direction they're
+      * sent?
+      */
+-    NAME_STACK_QUERY,
+-    NAME_STACK_REPLY
++    NAME_STACK_NAME_QUERY,
++    NAME_STACK_NAME_REPLY,
++    NAME_STACK_REGISTER_QUERY,
++    NAME_STACK_REGISTER_REPLY,
++    NAME_STACK_REGISTER_DELETE
+ };
+ 
+ #endif
+-- 
+1.6.3.2
+

@@ -1,0 +1,557 @@
+From 9e1b486f3083810a7d0e78e4643360edcf9788d7 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:30:07 -0700
+Subject: [PATCH 01/21] Add initial version
+
+---
+ Makefile |   18 ++++
+ dns.c    |  168 ++++++++++++++++++++++++++++++++++++++
+ dns.h    |   58 +++++++++++++
+ main.c   |  270 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 514 insertions(+), 0 deletions(-)
+ create mode 100644 Makefile
+ create mode 100644 dns.c
+ create mode 100644 dns.h
+ create mode 100644 main.c
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000..00f5f1a
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,18 @@
++TARGET := namestackd
++
++CFLAGS := -g -I../linux-2.6.27/include -I../namestackmod
++
++C_SRCS := \
++	  dns.c \
++          main.c
++
++LFLAGS := -lresolv -lpthread
++
++OBJECTS := $(patsubst %.c,%.o,$(C_SRCS))
++
++$(TARGET): $(OBJECTS)
++	$(CC) $(OBJECTS) $(LFLAGS) -o $@
++
++.PHONY: clean
++clean:
++	-rm $(TARGET) $(OBJECTS)
+diff --git a/dns.c b/dns.c
+new file mode 100644
+index 0000000..ae1f177
+--- /dev/null
++++ b/dns.c
+@@ -0,0 +1,168 @@
++#include "dns.h"
++#ifdef __KERNEL__
++#include <linux/in.h>
++#include "nameser.h"
++#else
++#include <string.h> /* NULL */
++#define BIND_8_COMPAT
++#include <arpa/nameser.h>
++#endif /* __KERNEL__ */
++
++uint16_t advance_name(const u_char *ptr, const u_char *start, uint16_t len)
++{
++	int has_pointer = 0;
++	const u_char *original_ptr = ptr;
++
++	for (; ptr - start < len; )
++	{
++		if ((*ptr & 0xc0) == 0xc0)
++		{
++			has_pointer = 1;
++			ptr += sizeof(uint16_t);
++			/* A pointer always terminates this loop */
++			break;
++		}
++		else
++		{
++			u_char label_len = *ptr;
++
++			ptr += label_len + 1;
++			if (!label_len)
++			{
++				/* An empty label indicates the end of the name
++				 */
++				break;
++			}
++		}
++	}
++	return ptr - original_ptr;
++}
++
++int parse_rr(const u_char *ptr, const u_char *start, uint16_t len,
++			 uint16_t *ptype, uint16_t *pclass, uint32_t *pttl,
++			 uint16_t *prdlength, const u_char **prdata)
++{
++	const u_char *original_ptr = ptr;
++	int overrun = 0;
++	uint16_t rdlength;
++
++	ptr += advance_name(ptr, start, len);
++
++	if (ptr - original_ptr + sizeof(uint16_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (ptype)
++		*ptype = htons(*(uint16_t *)ptr);
++	ptr += sizeof(uint16_t);
++
++	if (ptr - original_ptr + sizeof(uint16_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (pclass)
++		*pclass = htons(*(uint16_t *)ptr);
++	ptr += sizeof(uint16_t);
++
++	if (ptr - original_ptr + sizeof(uint32_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (pttl)
++		*pttl = htonl(*(uint32_t *)ptr);
++	ptr += sizeof(uint32_t);
++
++	if (ptr - original_ptr + sizeof(uint16_t) > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	rdlength = htons(*(uint16_t *)ptr);
++	if (prdlength)
++		*prdlength = rdlength;
++	ptr += sizeof(uint16_t);
++
++	if (ptr - original_ptr + rdlength > len)
++	{
++		overrun = 1;
++		goto out;
++	}
++	if (prdata)
++		*prdata = ptr;
++out:
++	return overrun;
++}
++
++int find_answer_of_type(const u_char *ptr, uint16_t len, uint16_t t,
++			uint16_t n, uint16_t *prdlength, const u_char **prdata)
++{
++	const u_char *original_ptr = ptr;
++	const HEADER *header = (const HEADER *)ptr;
++	uint16_t qdcount, ancount;
++	int i, matching_answers, overrun = 0;
++
++	if (len < sizeof(HEADER))
++	{
++		overrun = 1;
++		goto out;
++	}
++	qdcount = ntohs(header->qdcount);
++	ancount = ntohs(header->ancount);
++	/* Advance past questions */
++	ptr += sizeof(HEADER);
++	for (i = 0; i < qdcount; i++)
++	{
++		ptr += advance_name(ptr, original_ptr, len);
++		if (ptr - original_ptr + sizeof(uint16_t) > len)
++		{
++			overrun = 1;
++			goto out;
++		}
++		ptr += sizeof(uint16_t);
++		if (ptr - original_ptr + sizeof(uint16_t) > len)
++		{
++			overrun = 1;
++			goto out;
++		}
++		ptr += sizeof(uint16_t);
++	}
++	/* Walk through answers, looking for nth instance of type t */
++	for (i = 0, matching_answers = 0; i < ancount; i++)
++	{
++		uint16_t type, rdlength;
++		const u_char *rdata;
++
++		overrun = parse_rr(ptr, original_ptr, len, &type, NULL, NULL,
++				   &rdlength, &rdata);
++		if (!overrun)
++		{
++			ptr = rdata + rdlength;
++			if (type == t)
++			{
++				if (matching_answers == n)
++				{
++					/* Found the desired instance */
++					if (prdlength)
++						*prdlength = rdlength;
++					if (prdata)
++						*prdata = rdata;
++					break;
++				}
++				else
++					matching_answers++;
++			}
++		}
++	}
++	if (!overrun && i >= ancount)
++	{
++		/* This isn't really an overrun, but the desired instance
++		 * wasn't found.
++		 */
++		overrun = 1;
++	}
++out:
++	return overrun;
++}
+diff --git a/dns.h b/dns.h
+new file mode 100644
+index 0000000..c5491bc
+--- /dev/null
++++ b/dns.h
+@@ -0,0 +1,58 @@
++#ifndef __DNS_H__
++#define __DNS_H__
++
++#ifdef __KERNEL__
++#include <linux/types.h>
++#else
++#include <sys/types.h>
++#include <netinet/in.h>
++#endif
++
++/* The format of a resource record (RR) is defined in RFC 1035, section 3.2.1,
++ * as:
++ * (bit offset)
++ *                1
++ * 0              5
++ * +--------------+
++ * /     NAME     /
++ * +--------------+
++ * |     TYPE     |
++ * +--------------+
++ * |    CLASS     |
++ * +--------------+
++ * |      TTL     |
++ * |              |
++ * +--------------+
++ * | RDLENGTH     |
++ * +--------------+
++ * /    RDATA     /
++ * +--------------+
++ */
++
++/* Returns the number of bytes in the name beginning at ptr.
++ * start is the beginning of the message (not the name!), and len is
++ * the message's length in bytes.  (These are used as a failsafe, to terminate
++ * parsing a malformed name.)
++ */
++uint16_t advance_name(const u_char *ptr, const u_char *start, uint16_t len);
++
++/* Parses an RR, beginning at ptr, into its type, class, ttl, rdlength, and
++ * rdata.
++ * Returns 0 if the parsed RR is sane, nonzero otherwise.
++ */
++int parse_rr(const u_char *ptr, const u_char *start, uint16_t len,
++             uint16_t *ptype, uint16_t *pclass, uint32_t *pttl,
++             uint16_t *prdlength, const u_char **prdata);
++
++/* Given a DNS response in ptr, with length len, finds the nth answer of type t
++ * in the response.  If it's found, returns a pointer to its data (in *prdata)
++ * and the length of that data (in *prdlength), and returns 0.  If it isn't
++ * found, returns nonzero.
++ * This is meant to be called in a loop, with n = 0 for the first iteration of
++ * the loop, n = 1 for the second iteration, until find_answer_of_type returns
++ * a nonzero value.
++ */
++int find_answer_of_type(const u_char *ptr, uint16_t len, uint16_t t,
++			uint16_t n, uint16_t *prdlength, const u_char **prdata);
++
++#endif
+diff --git a/main.c b/main.c
+new file mode 100644
+index 0000000..e5ac35d
+--- /dev/null
++++ b/main.c
+@@ -0,0 +1,270 @@
++#include <sys/types.h>
++#include <netinet/in.h>
++#define BIND_8_COMPAT
++#include <arpa/nameser.h>
++#include <resolv.h>
++#include <netdb.h>
++#include <sys/socket.h>
++#include <linux/netlink.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <poll.h>
++#include "dns.h"
++#include "namestacknl.h"
++
++#define MAX_PAYLOAD 1024  /* maximum payload size*/
++
++int sock_fd;
++
++#define MAX_NAME_LEN 254
++
++static void print_a(const u_char *ptr, uint16_t rdlength,
++ const u_char *start, uint16_t len)
++{
++    if (rdlength != sizeof(uint32_t))
++        fprintf(stderr, "address record has invalid length %d\n", rdlength);
++     else if (ptr + rdlength - start > len)
++         fprintf(stderr, "address record overflows buffer\n");
++    else
++    {
++        uint32_t addr = *(uint32_t *)ptr;
++        u_char *addrp;
++
++        for (addrp = (u_char *)&addr;
++         addrp - (u_char *)&addr < sizeof(uint32_t);
++         addrp++)
++        {
++            if (addrp == (u_char *)&addr + sizeof(uint32_t) - 1)
++                printf("%d\n", *addrp);
++            else
++                printf("%d.", *addrp);
++        }
++    }
++}
++
++#ifndef s6_addr16
++#define s6_addr16   __u6_addr.__u6_addr16
++#endif
++
++static void print_aaaa(const u_char *ptr, uint16_t rdlength,
++ const u_char *start, uint16_t len)
++{
++    if (rdlength != sizeof(struct in6_addr))
++        fprintf(stderr, "address record has invalid length %d\n", rdlength);
++     else if (ptr + rdlength - start > len)
++         fprintf(stderr, "address record overflows buffer\n");
++    else
++    {
++        struct in6_addr *addr = (struct in6_addr *)ptr;
++        int i, in_zero = 0;
++
++        for (i = 0; i < 7; i++)
++        {
++            if (!addr->s6_addr16[i])
++            {
++                if (!in_zero)
++                {
++                    printf(":");
++                    in_zero = 1;
++                }
++            }
++            else
++            {
++                printf("%x:", ntohs(addr->s6_addr16[i]));
++                in_zero = 0;
++            }
++        }
++        printf("%x\n", ntohs(addr->s6_addr16[7]));
++    }
++}
++
++struct query_data
++{
++	unsigned int seq;
++	char name[MAX_NAME_LEN];
++};
++
++static void *query_thread(void *arg)
++{
++	struct query_data *data = arg;
++	u_char buf[PACKETSZ];
++	int len, msg_len, found_response = 0;
++	struct nlmsghdr *nlh = NULL;
++	uint16_t rdlength;
++	const u_char *rdata;
++
++	printf("querying %s (seq %d)\n", data->name, data->seq);
++	len = res_query(data->name, C_IN, T_AAAA, buf, sizeof(buf));
++	if (len >= 0)
++	{
++		found_response = !find_answer_of_type(buf, len, T_AAAA, 0,
++						      &rdlength, &rdata);
++		if (found_response)
++		{
++			printf("found a valid IPv6 address\n");
++			print_aaaa(rdata, rdlength, buf, len);
++		}
++	}
++	if (!found_response)
++	{
++		len = res_query(data->name, C_IN, T_A, buf, sizeof(buf));
++		if (len >= 0)
++		{
++			found_response = !find_answer_of_type(buf, len, T_A, 0,
++							      &rdlength,
++							      &rdata);
++			if (found_response)
++			{
++				printf("found a valid IPv4 address\n");
++				print_a(rdata, rdlength, buf, len);
++			}
++		}
++	}
++	if (!found_response)
++		printf("couldn't resolve %s: %d\n", data->name, h_errno);
++
++	msg_len = sizeof(int);
++	if (len > 0)
++		msg_len += len;
++	nlh = malloc(NLMSG_SPACE(msg_len));
++	if (nlh)
++	{
++		struct sockaddr_nl dest_addr;
++		struct iovec iov;
++		struct msghdr msg;
++
++		/* Send a reply message */
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
++		nlh->nlmsg_type = NAME_STACK_NAME_REPLY;
++		nlh->nlmsg_flags = 0;
++		nlh->nlmsg_seq = data->seq;
++		nlh->nlmsg_pid = 0;
++		memcpy(NLMSG_DATA(nlh), &len, sizeof(len));
++		if (len > 0)
++			memcpy(NLMSG_DATA(nlh) + sizeof(len), buf, len);
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		sendmsg(sock_fd, &msg, 0);
++
++		free(nlh);
++	}
++	free(data);
++}
++
++static void do_query(unsigned int seq, const char *data, size_t len)
++{
++	size_t measured_len;
++
++	printf("got a query request with seq %d for %s (%d)\n", seq, data, len);
++	/* Sanity-check the name */
++	if (len <= MAX_NAME_LEN)
++	{
++		for (measured_len = 0; data[measured_len] && measured_len < len;
++		     measured_len++)
++			;
++		if (!data[measured_len])
++		{
++			struct query_data *qdata =
++				malloc(sizeof(struct query_data));
++
++			if (qdata)
++			{
++				pthread_t thread_id;
++
++				qdata->seq = seq;
++				memcpy(qdata->name, data, measured_len + 1);
++				if (pthread_create(&thread_id, NULL,
++				    query_thread, qdata))
++				{
++					fprintf(stderr,
++						"thread creation failed, can't resolve name\n");
++					free(qdata);
++				}
++			}
++			else
++				fprintf(stderr, "alloc failed, can't resolve name\n");
++		}
++		else
++			fprintf(stderr, "query has unterminated name\n");
++	}
++	else
++		fprintf(stderr, "query has invalid name length %d\n",
++			len);
++}
++
++int main(int argc, const char *argv[])
++{
++	sock_fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_NAME_ORIENTED_STACK);
++	if (sock_fd >= 0) {
++		struct sockaddr_nl src_addr, dest_addr;
++		struct nlmsghdr *nlh = NULL;
++		struct iovec iov;
++		struct msghdr msg;
++		struct pollfd pfd;
++
++		memset(&src_addr, 0, sizeof(src_addr));
++		src_addr.nl_family = AF_NETLINK;
++		bind(sock_fd, (struct sockaddr*)&src_addr, sizeof(src_addr));
++
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh = malloc(NLMSG_SPACE(MAX_PAYLOAD));
++		/* Send a register message
++		 * FIXME: the message is empty, do I really need MAX_PAYLOAD
++		 * data bytes?
++		 */
++		nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
++		nlh->nlmsg_type = NAME_STACK_REGISTER;
++		nlh->nlmsg_pid = 0;
++		nlh->nlmsg_flags = 0;
++		*(char *)NLMSG_DATA(nlh) = 0;
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		sendmsg(sock_fd, &msg, 0);
++
++		/* Read message from kernel */
++		memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
++		recvmsg(sock_fd, &msg, 0);
++		/* FIXME: check that it's a reply */
++		printf("Received registration reply\n");
++
++		memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
++		pfd.fd = sock_fd;
++		pfd.events = POLLIN;
++		while (poll(&pfd, 1, -1)) {
++			recvmsg(sock_fd, &msg, 0);
++			switch (nlh->nlmsg_type)
++			{
++			case NAME_STACK_NAME_QUERY:
++				do_query(nlh->nlmsg_seq,
++					 NLMSG_DATA(nlh),
++					 NLMSG_PAYLOAD(nlh, 0));
++				break;
++			default:
++				fprintf(stderr, "unhandled msg type %d\n",
++					nlh->nlmsg_type);
++			}
++			memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
++		}
++		/* Close Netlink Socket */
++		close(sock_fd);
++	}
++	return 0;
++}
+-- 
+1.6.3.2
+

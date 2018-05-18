@@ -1,0 +1,204 @@
+From 98c03f75b5e0411849d6c24403ecd169d8102792 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:47:55 -0700
+Subject: [PATCH 31/67] Separate binding a name into two stages, qualifying the name and registering it
+
+---
+ net/namestack/af_name.c        |   40 ++++++++++++++++++++-------
+ net/namestack/main.c           |   59 ++++++++++++++++++++++++++++++++++++++++
+ net/namestack/namestack_priv.h |    3 ++
+ net/namestack/namestacknl.h    |    2 +
+ 4 files changed, 94 insertions(+), 10 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 343cc08..d7d56b5 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -119,7 +119,17 @@ out:
+ 	return 0;
+ }
+ 
+-static void name_bind_cb(int result, const char *bound_name, void *data)
++static void name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn)
++{
++	/* FIXME: need to check if the name is already registered */
++	/* FIXME: need attempt to bind to the specified port on each
++	 * transport socket.
++	 */
++	printk(KERN_INFO "bound to %s\n", fqdn);
++	strcpy(name->sname.sname_addr.name, fqdn);
++}
++
++static void name_register_cb(int result, const char *bound_name, void *data)
+ {
+ 	struct socket *sock = data;
+ 	struct sock *sk = sock->sk;
+@@ -128,14 +138,25 @@ static void name_bind_cb(int result, const char *bound_name, void *data)
+ 	sk->sk_state &= ~NAMEF_BINDING;
+ 	name->async_error = -result;
+ 	if (!result)
++		name_bind_to_fqdn(name, bound_name);
++}
++
++static void name_qualify_cb(const char *fully_qualified_name, void *data)
++{
++	struct socket *sock = data;
++	struct sock *sk = sock->sk;
++	struct name_stream_sock *name = name_stream_sk(sk);
++	int err;
++
++	printk(KERN_INFO "name qualified as %s\n", fully_qualified_name);
++	/* FIXME: need to select addresses to register for name */
++	err = name_send_registration(fully_qualified_name,
++				     name_register_cb, sock);
++	if (err)
+ 	{
+-		/* FIXME: need attempt to bind to the specified port on each
+-		 * transport socket.  Unfortunately none may exist at the
+-		 * moment, because they're not created except in connect.
+-		 * That needs to be fixed too.
+-		 */
+-		printk(KERN_INFO "bound to %s\n", bound_name);
+-		strcpy(name->sname.sname_addr.name, bound_name);
++		name->async_error = -err;
++		sk->sk_state &= ~NAMEF_BINDING;
++		sk->sk_state_change(sk);
+ 	}
+ }
+ 
+@@ -167,7 +188,6 @@ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 
+ 	if (addr_len < sizeof(struct sockaddr_name))
+ 		return -EINVAL;
+-	/* FIXME: need to check whether the name has already been bound */
+ 	printk(KERN_INFO "requesting bind to %s\n", addr->sname_addr.name);
+ 
+ 	sk = sock->sk;
+@@ -197,7 +217,7 @@ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 	 * stateless:  if the addresses change, a new request can be sent, and
+ 	 * it should replace the current name registration.
+ 	 */
+-	err = name_send_registration(addr->sname_addr.name, name_bind_cb, sock);
++	err = name_fully_qualify(addr->sname_addr.name, name_qualify_cb, sock);
+ 	if (err)
+ 		goto out;
+ 
+diff --git a/net/namestack/main.c b/net/namestack/main.c
+index 18adc0e..2f2bdcb 100644
+--- a/net/namestack/main.c
++++ b/net/namestack/main.c
+@@ -230,10 +230,47 @@ handle_register_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ }
+ 
+ static int
++handle_qualify_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
++{
++	struct pending_node *node;
++
++	printk("received qualify reply message from user %d, process %d\n",
++		NETLINK_CREDS(skb)->uid,
++		NETLINK_CREDS(skb)->pid);
++	node = pending_queue_find_and_remove(nlh->nlmsg_seq);
++	if (node)
++	{
++		printk(KERN_INFO "found reply on pending queue\n");
++		if (NLMSG_PAYLOAD(nlh, 0) >= sizeof(int))
++		{
++			int name_len;
++			char name_buf[MAX_NAME_LEN];
++			qualify_cb cb = node->cb;
++
++			memcpy(&name_len, NLMSG_DATA(nlh), sizeof(int));
++			if (name_len)
++				memcpy(name_buf, NLMSG_DATA(nlh) + sizeof(int),
++				       name_len);
++			name_buf[name_len] = 0;
++			cb(name_buf, node->data);
++		}
++		else
++			printk(KERN_WARNING
++			       "invalid payload length in reply\n");
++	}
++	else
++		printk(KERN_WARNING "reply for unknown request\n");
++	/* Send an empty REPLY as an ack */
++	return namestack_send_message(NETLINK_CREDS(skb)->pid,
++		NAME_STACK_QUALIFY_REPLY, NULL, 0);
++}
++
++static int
+ nos_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+ {
+ 	int err = 0;
+ 
++	printk(KERN_INFO "got message type %d\n", nlh->nlmsg_type);
+ 	switch (nlh->nlmsg_type) {
+ 	case NAME_STACK_REGISTER:
+ 		err = handle_register(skb, nlh);
+@@ -244,6 +281,9 @@ nos_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+ 	case NAME_STACK_REGISTER_REPLY:
+ 		err = handle_register_reply(skb, nlh);
+ 		break;
++	case NAME_STACK_QUALIFY_REPLY:
++		err = handle_qualify_reply(skb, nlh);
++		break;
+ 	default:
+ 		err = -ENOSYS;
+ 	}
+@@ -354,6 +394,25 @@ int name_send_query(const char *name, query_resolv_cb cb, void *data)
+ 	return err;
+ }
+ 
++int name_fully_qualify(const char *name, qualify_cb cb, void *data)
++{
++	int err;
++
++	if (!daemon_pid) {
++		printk(KERN_WARNING "no resolver daemon, unable to send query\n");
++		err = -ENOSYS;
++	}
++	else {
++		printk(KERN_INFO "qualifying %s\n", name);
++		/* FIXME:  who handles retrying in case of failure? */
++		err = namestack_send_message_tracked(daemon_pid,
++						     NAME_STACK_QUALIFY_QUERY,
++						     name, strlen(name) + 1,
++						     cb, data);
++	}
++	return err;
++}
++
+ int name_send_registration(const char *name, register_cb cb, void *data)
+ {
+ 	int err;
+diff --git a/net/namestack/namestack_priv.h b/net/namestack/namestack_priv.h
+index 8edb72e..e556d12 100644
+--- a/net/namestack/namestack_priv.h
++++ b/net/namestack/namestack_priv.h
+@@ -13,7 +13,10 @@ int name_send_query(const char *name, query_resolv_cb cb, void *data);
+ void name_cancel_query(void *data);
+ 
+ /* Name registration (bind()/DNS update) functions */
++typedef void (*qualify_cb)(const char *name, void *data);
++int name_fully_qualify(const char *name, qualify_cb cb, void *data);
+ typedef void (*register_cb)(int result, const char *name, void *data);
++/* FIXME: needs to be given a list of addresses */
+ int name_send_registration(const char *name, register_cb cb, void *data);
+ void name_delete_registration(const char *name);
+ 
+diff --git a/net/namestack/namestacknl.h b/net/namestack/namestacknl.h
+index a0747b1..1ecb5cc 100644
+--- a/net/namestack/namestacknl.h
++++ b/net/namestack/namestacknl.h
+@@ -10,6 +10,8 @@ enum {
+      */
+     NAME_STACK_NAME_QUERY,
+     NAME_STACK_NAME_REPLY,
++    NAME_STACK_QUALIFY_QUERY,
++    NAME_STACK_QUALIFY_REPLY,
+     NAME_STACK_REGISTER_QUERY,
+     NAME_STACK_REGISTER_REPLY,
+     NAME_STACK_REGISTER_DELETE
+-- 
+1.6.3.2
+

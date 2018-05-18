@@ -1,0 +1,29 @@
+From 05c4e959e5f7675074c31b2231471d335ba72335 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:50:38 -0700
+Subject: [PATCH] Make IPv6 listening sockets listen for IPv6 connections only in order to avoid confusion between IPv6 and IPv4 listening sockets
+
+---
+ af_name.c |    6 ++++++
+ 1 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 881fca3..880ff22 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -134,6 +134,12 @@ static int name_create_v6_sock(int type, int protocol, struct socket **sock)
+ {
+ 	int err = sock_create_kern(PF_INET6, type, protocol, sock);
+ 
++	if (!err) {
++		int on = 1;
++
++		err = kernel_setsockopt(*sock, IPPROTO_IPV6, IPV6_V6ONLY,
++					(char *)&on, sizeof(on));
++	}
+ 	return err;
+ }
+ 
+-- 
+1.6.0.4
+

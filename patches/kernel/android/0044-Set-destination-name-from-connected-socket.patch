@@ -1,0 +1,113 @@
+From 15fadd3603b4fcc11199306b77f90c4df56e510b Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:51:11 -0700
+Subject: [PATCH 44/67] Set destination name from connected socket
+
+---
+ net/namestack/af_name.c |   75 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 75 insertions(+), 0 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 3406666..2c1593c 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -709,6 +709,77 @@ out:
+ 	return sock;
+ }
+ 
++static int get_name_from_v6_sock(struct sockaddr_name *name,
++				 struct socket *sock)
++{
++	struct sockaddr_in6 addr;
++	int err, len = sizeof(addr);
++
++	name->sname_family = AF_NAME;
++	/* FIXME: get name from options if they're present */
++	/* FIXME: what's the real domain? */
++	err = sock->ops->getname(sock, (struct sockaddr *)&addr, &len, 1);
++	if (err)
++		goto out;
++	sprintf(name->sname_addr.name,
++		"\\[x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x/128].ip6.arpa",
++		addr.sin6_addr.s6_addr[0],
++		addr.sin6_addr.s6_addr[1],
++		addr.sin6_addr.s6_addr[2],
++		addr.sin6_addr.s6_addr[3],
++		addr.sin6_addr.s6_addr[4],
++		addr.sin6_addr.s6_addr[5],
++		addr.sin6_addr.s6_addr[6],
++		addr.sin6_addr.s6_addr[7],
++		addr.sin6_addr.s6_addr[8],
++		addr.sin6_addr.s6_addr[9],
++		addr.sin6_addr.s6_addr[10],
++		addr.sin6_addr.s6_addr[11],
++		addr.sin6_addr.s6_addr[12],
++		addr.sin6_addr.s6_addr[13],
++		addr.sin6_addr.s6_addr[14],
++		addr.sin6_addr.s6_addr[15]);
++	name->sname_port = addr.sin6_port;
++out:
++	return err;
++}
++
++static int get_name_from_v4_sock(struct sockaddr_name *name,
++				 struct socket *sock)
++{
++	/* FIXME: what's the real domain? */
++	static const char domain[] = ".in-addr.arpa";
++	struct sockaddr_in addr;
++	int err, len = sizeof(addr);
++	char *p;
++	const u_char *addrp;
++
++	name->sname_family = AF_NAME;
++	/* Create a canonical name for the legacy peer.
++	 * FIXME: should I attempt a reverse DNS lookup of the peer address?
++	 */
++	err = sock->ops->getname(sock, (struct sockaddr *)&addr, &len, 1);
++	if (err)
++		goto out;
++	p = name->sname_addr.name;
++	for (addrp = (u_char *)&addr.sin_addr.s_addr +
++	     sizeof(addr.sin_addr.s_addr) - 1;
++	     addrp - (u_char *)&addr.sin_addr.s_addr >= 0;
++	     addrp--)
++	{
++		int n;
++
++		sprintf(p, "%d%n", *addrp, &n);
++		p += n;
++		if (addrp > (u_char *)&addr.sin_addr.s_addr)
++			*p++ = '.';
++	}
++	strcat(p, domain);
++	name->sname_port = addr.sin_port;
++out:
++	return err;
++}
++
+ static int name_stream_accept(struct socket *sock, struct socket *newsock,
+ 			      int flags)
+ {
+@@ -793,6 +864,7 @@ handle_incoming:
+ 			sock_put(incoming_sock);
+ 			goto out_err;
+ 		}
++		get_name_from_v6_sock(&new_name->dname, new_name->ipv6_sock);
+ 	}
+ 	if (new_v4_sk) {
+ 		new_name->ipv4_sock = create_stream_sock_from_sk(PF_INET,
+@@ -801,7 +873,10 @@ handle_incoming:
+ 			sock_put(incoming_sock);
+ 			goto out_err;
+ 		}
++		get_name_from_v4_sock(&new_name->dname, new_name->ipv4_sock);
+ 	}
++	printk(KERN_INFO "connection accepted from %s\n",
++	       new_name->dname.sname_addr.name);
+ 	sock_graft(incoming_sock, newsock);
+ 	newsock->state = SS_CONNECTED;
+ 	err = 0;
+-- 
+1.6.3.2
+

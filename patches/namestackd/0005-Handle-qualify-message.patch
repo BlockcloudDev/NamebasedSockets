@@ -1,0 +1,132 @@
+From 65ce8fe89b42b7fd923d0436506dd27695124f91 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:31:10 -0700
+Subject: [PATCH 05/21] Handle qualify message
+
+---
+ main.c |   95 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 95 insertions(+), 0 deletions(-)
+
+diff --git a/main.c b/main.c
+index 872b433..aec601c 100644
+--- a/main.c
++++ b/main.c
+@@ -203,6 +203,95 @@ static void do_query(unsigned int seq, const char *data, size_t len)
+ 			len);
+ }
+ 
++static void send_qualify_response(unsigned int seq, const char *registered_name)
++{
++	int msg_len, name_len;
++	struct nlmsghdr *nlh = NULL;
++
++	printf("qualified as %s\n", registered_name);
++	name_len = strlen(registered_name);
++	msg_len = sizeof(int) + name_len;
++	nlh = malloc(NLMSG_SPACE(msg_len));
++	if (nlh)
++	{
++		struct sockaddr_nl dest_addr;
++		struct iovec iov;
++		struct msghdr msg;
++		int err;
++
++		/* Send a reply message */
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
++		nlh->nlmsg_type = NAME_STACK_QUALIFY_REPLY;
++		nlh->nlmsg_flags = 0;
++		nlh->nlmsg_seq = seq;
++		nlh->nlmsg_pid = 0;
++		memcpy(NLMSG_DATA(nlh), &name_len, sizeof(name_len));
++		memcpy(NLMSG_DATA(nlh) + sizeof(int), registered_name,
++		       name_len);
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		err = sendmsg(sock_fd, &msg, 0);
++		printf("sendmsg returned %d\n", err);
++
++		free(nlh);
++	}
++}
++
++static void do_qualify(unsigned int seq, const char *data, size_t len)
++{
++	size_t measured_len;
++
++	printf("qualifying %s\n", data);
++	/* Sanity-check the name */
++	if (len < MAX_NAME_LEN)
++	{
++		for (measured_len = 0; data[measured_len] && measured_len < len;
++		     measured_len++)
++			;
++		if (!data[measured_len])
++		{
++			char name[MAX_NAME_LEN];
++
++			memcpy(name, data, measured_len + 1);
++			if (name[len - 1] == '.')
++			{
++				/* name is already fully qualified, just call
++				 * back with the same name.
++				 */
++				send_qualify_response(seq, name);
++			}
++			else
++			{
++				if (strlen(name) + strlen(_res.defdname) + 1 <
++				    MAX_NAME_LEN)
++				{
++					char full_name[MAX_NAME_LEN];
++
++					sprintf(full_name, "%s.%s.", name,
++						_res.defdname);
++					send_qualify_response(seq, full_name);
++				}
++				else
++					fprintf(stderr, "name too long\n");
++			}
++		}
++		else
++			fprintf(stderr, "query has unterminated name\n");
++	}
++	else
++		fprintf(stderr, "query has invalid name length %d\n",
++			len);
++}
++
+ struct register_data
+ {
+ 	unsigned int seq;
+@@ -438,6 +527,7 @@ static void do_delete_registration(unsigned int seq, const char *data,
+ 
+ int main(int argc, const char *argv[])
+ {
++	res_init();
+ 	sock_fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_NAME_ORIENTED_STACK);
+ 	if (sock_fd >= 0) {
+ 		struct sockaddr_nl src_addr, dest_addr;
+@@ -491,6 +581,11 @@ int main(int argc, const char *argv[])
+ 					 NLMSG_DATA(nlh),
+ 					 NLMSG_PAYLOAD(nlh, 0));
+ 				break;
++			case NAME_STACK_QUALIFY_QUERY:
++				do_qualify(nlh->nlmsg_seq,
++					   NLMSG_DATA(nlh),
++					   NLMSG_PAYLOAD(nlh, 0));
++				break;
+ 			case NAME_STACK_REGISTER_QUERY:
+ 				do_register(nlh->nlmsg_seq,
+ 					    NLMSG_DATA(nlh),
+-- 
+1.6.3.2
+

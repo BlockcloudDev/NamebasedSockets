@@ -1,0 +1,155 @@
+From 31d08c2e67ea352c8405650b03bce48ee4647770 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:41:54 -0700
+Subject: [PATCH] Separate types for stream and dgram sockets
+
+---
+ af_name.c |   81 +++++++++++++++++++++++++++++++++++++-----------------------
+ 1 files changed, 50 insertions(+), 31 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 168f7a8..7bf9fdb 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -6,7 +6,7 @@
+ #include <linux/inname.h>
+ #include "namestack_priv.h"
+ 
+-struct name_sock
++struct name_stream_sock
+ {
+ 	struct sock sk;
+ 	struct name_addr sname;
+@@ -169,9 +169,34 @@ static const struct proto_ops name_stream_ops = {
+ static struct proto name_stream_proto = {
+ 	.name = "NAME_STREAM",
+ 	.owner = THIS_MODULE,
+-	.obj_size = sizeof(struct name_sock),
++	.obj_size = sizeof(struct name_stream_sock),
+ };
+ 
++static inline struct name_stream_sock *name_stream_sk(const struct sock *sk)
++{
++	return (struct name_stream_sock *)sk;
++}
++
++static struct sock *name_alloc_stream_socket(struct net *net,
++					     struct socket *sock)
++{
++	struct sock *sk = sk_alloc(net, AF_NAME, GFP_ATOMIC,
++				   &name_stream_proto);
++	struct name_stream_sock *name;
++
++	if (!sk)
++		goto out;
++
++	sock->ops = &name_stream_ops;
++	sock_init_data(sock, sk);
++
++	name = name_stream_sk(sk);
++	name->sname.name[0] = 0;
++	name->dname.name[0] = 0;
++out:
++	return sk;
++}
++
+ static int name_dgram_release(struct socket *sock)
+ {
+ 	struct sock *sk = sock->sk;
+@@ -214,28 +239,37 @@ static const struct proto_ops name_dgram_ops = {
+ 	.sendpage = sock_no_sendpage,
+ };
+ 
++struct name_dgram_sock
++{
++	struct sock sk;
++	struct name_addr sname;
++	struct name_addr dname;
++};
++
+ static struct proto name_dgram_proto = {
+ 	.name = "NAME_DGRAM",
+ 	.owner = THIS_MODULE,
+-	.obj_size = sizeof(struct name_sock),
++	.obj_size = sizeof(struct name_dgram_sock),
+ };
+ 
+-static inline struct name_sock *name_sk(const struct sock *sk)
++static inline struct name_dgram_sock *name_dgram_sk(const struct sock *sk)
+ {
+-	return (struct name_sock *)sk;
++	return (struct name_dgram_sock *)sk;
+ }
+ 
+-static struct sock *name_alloc_socket(struct net *net, struct proto *proto)
++static struct sock *name_alloc_dgram_socket(struct net *net,
++					    struct socket *sock)
+ {
+-	struct sock *sk = sk_alloc(net, AF_NAME, GFP_ATOMIC, proto);
+-	struct name_sock *name;
++	struct sock *sk = sk_alloc(net, AF_NAME, GFP_ATOMIC, &name_dgram_proto);
++	struct name_dgram_sock *name;
+ 
+ 	if (!sk)
+ 		goto out;
+ 
+-	sock_init_data(NULL, sk);
++	sock->ops = &name_dgram_ops;
++	sock_init_data(sock, sk);
+ 
+-	name = name_sk(sk);
++	name = name_dgram_sk(sk);
+ 	name->sname.name[0] = 0;
+ 	name->dname.name[0] = 0;
+ out:
+@@ -245,9 +279,6 @@ out:
+ static int name_create(struct net *net, struct socket *sock, int protocol)
+ {
+ 	struct sock *sk;
+-	struct name_sock *name;
+-	struct proto *proto;
+-	const struct proto_ops *proto_ops;
+ 	int rc;
+ 
+ 	if (net != &init_net)
+@@ -257,31 +288,19 @@ static int name_create(struct net *net, struct socket *sock, int protocol)
+ 	switch (sock->type)
+ 	{
+ 	case SOCK_STREAM:
+-		proto = &name_stream_proto;
+-		proto_ops = &name_stream_ops;
++		rc = -ENOMEM;
++		if ((sk = name_alloc_stream_socket(net, sock)))
++			rc = 0;
+ 		break;
+ 	case SOCK_DGRAM:
+-		proto = &name_dgram_proto;
+-		proto_ops = &name_dgram_ops;
++		rc = -ENOMEM;
++		if ((sk = name_alloc_dgram_socket(net, sock)))
++			rc = 0;
+ 		break;
+ 	default:
+ 		rc = -EPROTONOSUPPORT;
+ 	}
+-	if (rc)
+-		goto out;
+ 
+-	sock->ops = proto_ops;
+-
+-	rc = -ENOMEM;
+-	if (!(sk = name_alloc_socket(net, proto)))
+-		goto out;
+-
+-	name = name_sk(sk);
+-
+-	sock_init_data(sock, sk);
+-
+-	rc = 0;
+-out:
+ 	return rc;
+ }
+ 
+-- 
+1.6.0.4
+

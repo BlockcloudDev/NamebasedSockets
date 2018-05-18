@@ -1,0 +1,21 @@
+From 52c13a0fbd6bb95f4c2b2a9fab35c6ebce548199 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Fri, 18 Sep 2009 10:15:46 -0700
+Subject: [PATCH 1/2] Add namestack to built subdirectories
+
+---
+ net/Makefile |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/net/Makefile b/net/Makefile
+index 0fcce89..0567728 100644
+--- a/net/Makefile
++++ b/net/Makefile
+@@ -64,3 +64,4 @@ ifeq ($(CONFIG_NET),y)
+ obj-$(CONFIG_SYSCTL)		+= sysctl_net.o
+ endif
+ obj-$(CONFIG_WIMAX)		+= wimax/
++obj-$(CONFIG_NAMESTACK)		+= namestack/
+-- 
+1.6.3.2
+

@@ -1,0 +1,40 @@
+From bd5610ddd9224a89be51677222ad1b0e445fb6c5 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:32:20 -0700
+Subject: [PATCH 09/21] Add definitions omitted by android
+
+---
+ daemon.c |   17 +++++++++++++++++
+ 1 files changed, 17 insertions(+), 0 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index cd09362..6b4837d 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -17,6 +17,23 @@
+ 
+ #define MAX_PAYLOAD 1024  /* maximum payload size*/
+ 
++/* Definitions thare are ordinarily in <arpa/nameser.h>
++ * (or <arpa/nameser8_compat.h, included by <arpa/nameser.h> if BIND_8_COMPAT
++ * is defined), but not in android:
++ */
++#ifndef PACKETSZ
++#define PACKETSZ 512
++#endif
++#ifndef C_IN
++#define C_IN 1
++#endif
++#ifndef T_A
++#define T_A 1
++#endif
++#ifndef T_AAAA
++#define T_AAAA 28
++#endif
++
+ int sock_fd;
+ 
+ #define MAX_NAME_LEN 254
+-- 
+1.6.3.2
+

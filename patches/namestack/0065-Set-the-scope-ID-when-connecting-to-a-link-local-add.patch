@@ -1,0 +1,114 @@
+From 3e296a1bcef0f582ab139ab5c3c967793b12bd42 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Tue, 15 Sep 2009 14:02:28 -0700
+Subject: [PATCH] Set the scope ID when connecting to a link-local address
+
+---
+ address.c        |   46 ++++++++++++++++++++++++++++++++++++++++++++++
+ af_name.c        |   18 ++++++++++++++++++
+ namestack_priv.h |    6 ++++++
+ 3 files changed, 70 insertions(+), 0 deletions(-)
+
+diff --git a/address.c b/address.c
+index 3691bed..c299ad4 100644
+--- a/address.c
++++ b/address.c
+@@ -185,3 +185,49 @@ int match_v6_address_to_scope(struct sockaddr_in6 *sin6)
+ 	}
+ 	return -ENODEV;
+ }
++
++int choose_scope_for_v6_address(struct sockaddr_in6 *sin6)
++{
++	/* FIXME: for now, always picks the first interface with an IPv6
++	 * address, or the first up interface if that fails.  Should instead:
++	 * 1. Use the source name's scope ID, if the socket is bound to a local
++	 *    name and the local name is a link-local address.
++	 * 2. Allow choosing among multiple possible interfaces.
++	 */
++	struct net *net = &init_net;
++	struct net_device *dev;
++
++	/* FIXME: lock net? */
++	for_each_netdev(net, dev) {
++		if (!(dev->flags & IFF_UP))
++			continue;
++		if (dev->flags & IFF_LOOPBACK)
++			continue;
++		if (dev->ip6_ptr) {
++			struct inet6_dev *in6 = dev->ip6_ptr;
++			struct inet6_ifaddr *addr;
++
++			for (addr = in6->addr_list; addr; addr = addr->if_next) {
++				printk(KERN_INFO "using scope id %d for %s\n",
++				       dev->ifindex, dev->name);
++				sin6->sin6_scope_id = dev->ifindex;
++				return 0;
++			}
++		}
++	}
++	/* If no IPv6 address was configured, hope for the best with the first
++	 * up interface.
++	 */
++	for_each_netdev(net, dev) {
++		if (!(dev->flags & IFF_UP))
++			continue;
++		if (dev->flags & IFF_LOOPBACK)
++			continue;
++		printk(KERN_INFO "using scope id %d for %s\n",
++		       dev->ifindex, dev->name);
++		sin6->sin6_scope_id = dev->ifindex;
++		return 0;
++	}
++	/* No interface, that'll definitely fail */
++	return -ENODEV;
++}
+diff --git a/af_name.c b/af_name.c
+index 1a0e323..dd12d87 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -1137,6 +1137,24 @@ static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
+ 	sin6.sin6_family = AF_INET6;
+ 	sin6.sin6_port = name->dname.sname_port;
+ 	memcpy(&sin6.sin6_addr, addr, sizeof(*addr));
++	/* If the destination is a link-local address, choose the scope id
++	 * that defines the interface with which to attempt the connection.
++	 * FIXME: if it's ambiguous, should we try on every interface with
++	 * an IPv6 address?
++	 */
++	if (sin6.sin6_addr.s6_addr[0] == 0xfe &&
++	    sin6.sin6_addr.s6_addr[1] == 0x80)
++	{
++		err = choose_scope_for_v6_address(&sin6);
++		if (err) {
++			printk(KERN_WARNING "choose_scope_for_v6_address failed: %d\n",
++			       err);
++			goto out;
++                }
++		else
++			printk(KERN_INFO "chose scope %d\n",
++			       sin6.sin6_scope_id);
++	}
+ 
+ 	if (name->sname.sname_addr.name[0]) {
+ 		err = set_name_option(name->ipv6_sock,
+diff --git a/namestack_priv.h b/namestack_priv.h
+index 96cba50..39acca4 100644
+--- a/namestack_priv.h
++++ b/namestack_priv.h
+@@ -54,6 +54,12 @@ int choose_addresses(int *num_v6_addresses, struct in6_addr **v6_addresses,
+  */
+ int match_v6_address_to_scope(struct sockaddr_in6 *sin6);
+ 
++/* Attempts to choose a scope id on which sin6 is reachable, and sets
++ * sin6's scope id to the matching scope id.
++ * Returns 0 if found, an error code on failure.
++ */
++int choose_scope_for_v6_address(struct sockaddr_in6 *sin6);
++
+ /* Name registration (bind()/DNS update) functions */
+ typedef void (*qualify_cb)(const char *name, void *data);
+ int name_fully_qualify(const char *name, qualify_cb cb, void *data);
+-- 
+1.6.0.4
+

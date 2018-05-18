@@ -1,0 +1,1412 @@
+From ad8026131f37493023e7bed8c1ec96c6205cd8cd Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:31:41 -0700
+Subject: [PATCH 07/21] Move bulk of code to separate file (to facilitate Android port)
+
+---
+ Makefile |    1 +
+ daemon.c |  673 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ daemon.h |   14 ++
+ main.c   |  674 +-------------------------------------------------------------
+ 4 files changed, 694 insertions(+), 668 deletions(-)
+ create mode 100644 daemon.c
+ create mode 100644 daemon.h
+
+diff --git a/Makefile b/Makefile
+index 00f5f1a..766ea32 100644
+--- a/Makefile
++++ b/Makefile
+@@ -3,6 +3,7 @@ TARGET := namestackd
+ CFLAGS := -g -I../linux-2.6.27/include -I../namestackmod
+ 
+ C_SRCS := \
++	  daemon.c \
+ 	  dns.c \
+           main.c
+ 
+diff --git a/daemon.c b/daemon.c
+new file mode 100644
+index 0000000..9a52b2a
+--- /dev/null
++++ b/daemon.c
+@@ -0,0 +1,673 @@
++#include <sys/types.h>
++#include <netinet/in.h>
++#define BIND_8_COMPAT
++#include <arpa/nameser.h>
++#include <resolv.h>
++#include <netdb.h>
++#include <sys/socket.h>
++#include <linux/netlink.h>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <poll.h>
++#include "dns.h"
++#include "namestacknl.h"
++
++#define MAX_PAYLOAD 1024  /* maximum payload size*/
++
++int sock_fd;
++
++#define MAX_NAME_LEN 254
++
++static void print_a(const u_char *ptr, uint16_t rdlength,
++ const u_char *start, uint16_t len)
++{
++    if (rdlength != sizeof(uint32_t))
++        fprintf(stderr, "address record has invalid length %d\n", rdlength);
++     else if (ptr + rdlength - start > len)
++         fprintf(stderr, "address record overflows buffer\n");
++    else
++    {
++        uint32_t addr = *(uint32_t *)ptr;
++        u_char *addrp;
++
++        for (addrp = (u_char *)&addr;
++         addrp - (u_char *)&addr < sizeof(uint32_t);
++         addrp++)
++        {
++            if (addrp == (u_char *)&addr + sizeof(uint32_t) - 1)
++                printf("%d\n", *addrp);
++            else
++                printf("%d.", *addrp);
++        }
++    }
++}
++
++#ifndef s6_addr16
++#define s6_addr16   __u6_addr.__u6_addr16
++#endif
++
++static void print_aaaa(const u_char *ptr, uint16_t rdlength,
++ const u_char *start, uint16_t len)
++{
++    if (rdlength != sizeof(struct in6_addr))
++        fprintf(stderr, "address record has invalid length %d\n", rdlength);
++     else if (ptr + rdlength - start > len)
++         fprintf(stderr, "address record overflows buffer\n");
++    else
++    {
++        struct in6_addr *addr = (struct in6_addr *)ptr;
++        int i, in_zero = 0;
++
++        for (i = 0; i < 7; i++)
++        {
++            if (!addr->s6_addr16[i])
++            {
++                if (!in_zero)
++                {
++                    printf(":");
++                    in_zero = 1;
++                }
++            }
++            else
++            {
++                printf("%x:", ntohs(addr->s6_addr16[i]));
++                in_zero = 0;
++            }
++        }
++        printf("%x\n", ntohs(addr->s6_addr16[7]));
++    }
++}
++
++struct query_data
++{
++	unsigned int seq;
++	char name[MAX_NAME_LEN];
++};
++
++static void *query_thread(void *arg)
++{
++	struct query_data *data = arg;
++	u_char buf[PACKETSZ];
++	int len, msg_len, found_response = 0;
++	struct nlmsghdr *nlh = NULL;
++	uint16_t rdlength;
++	const u_char *rdata;
++
++	printf("querying %s (seq %d)\n", data->name, data->seq);
++	len = res_query(data->name, C_IN, T_AAAA, buf, sizeof(buf));
++	if (len >= 0)
++	{
++		found_response = !find_answer_of_type(buf, len, T_AAAA, 0,
++						      &rdlength, &rdata);
++		if (found_response)
++		{
++			printf("found a valid IPv6 address\n");
++			print_aaaa(rdata, rdlength, buf, len);
++		}
++	}
++	if (!found_response)
++	{
++		len = res_query(data->name, C_IN, T_A, buf, sizeof(buf));
++		if (len >= 0)
++		{
++			found_response = !find_answer_of_type(buf, len, T_A, 0,
++							      &rdlength,
++							      &rdata);
++			if (found_response)
++			{
++				printf("found a valid IPv4 address\n");
++				print_a(rdata, rdlength, buf, len);
++			}
++		}
++	}
++	if (!found_response)
++		printf("couldn't resolve %s: %d\n", data->name, h_errno);
++
++	msg_len = sizeof(int);
++	if (len > 0)
++		msg_len += len;
++	nlh = malloc(NLMSG_SPACE(msg_len));
++	if (nlh)
++	{
++		struct sockaddr_nl dest_addr;
++		struct iovec iov;
++		struct msghdr msg;
++
++		/* Send a reply message */
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
++		nlh->nlmsg_type = NAME_STACK_NAME_REPLY;
++		nlh->nlmsg_flags = 0;
++		nlh->nlmsg_seq = data->seq;
++		nlh->nlmsg_pid = 0;
++		memcpy(NLMSG_DATA(nlh), &len, sizeof(len));
++		if (len > 0)
++			memcpy(NLMSG_DATA(nlh) + sizeof(len), buf, len);
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		sendmsg(sock_fd, &msg, 0);
++
++		free(nlh);
++	}
++	free(data);
++}
++
++static void do_query(unsigned int seq, const char *data, size_t len)
++{
++	size_t measured_len;
++
++	printf("got a query request with seq %d for %s (%d)\n", seq, data, len);
++	/* Sanity-check the name */
++	if (len <= MAX_NAME_LEN)
++	{
++		for (measured_len = 0; data[measured_len] && measured_len < len;
++		     measured_len++)
++			;
++		if (!data[measured_len])
++		{
++			struct query_data *qdata =
++				malloc(sizeof(struct query_data));
++
++			if (qdata)
++			{
++				pthread_t thread_id;
++
++				qdata->seq = seq;
++				memcpy(qdata->name, data, measured_len + 1);
++				if (pthread_create(&thread_id, NULL,
++				    query_thread, qdata))
++				{
++					fprintf(stderr,
++						"thread creation failed, can't resolve name\n");
++					free(qdata);
++				}
++			}
++			else
++				fprintf(stderr, "alloc failed, can't resolve name\n");
++		}
++		else
++			fprintf(stderr, "query has unterminated name\n");
++	}
++	else
++		fprintf(stderr, "query has invalid name length %d\n",
++			len);
++}
++
++static void send_qualify_response(unsigned int seq, const char *registered_name)
++{
++	int msg_len, name_len;
++	struct nlmsghdr *nlh = NULL;
++
++	printf("qualified as %s\n", registered_name);
++	name_len = strlen(registered_name);
++	msg_len = sizeof(int) + name_len;
++	nlh = malloc(NLMSG_SPACE(msg_len));
++	if (nlh)
++	{
++		struct sockaddr_nl dest_addr;
++		struct iovec iov;
++		struct msghdr msg;
++		int err;
++
++		/* Send a reply message */
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
++		nlh->nlmsg_type = NAME_STACK_QUALIFY_REPLY;
++		nlh->nlmsg_flags = 0;
++		nlh->nlmsg_seq = seq;
++		nlh->nlmsg_pid = 0;
++		memcpy(NLMSG_DATA(nlh), &name_len, sizeof(name_len));
++		memcpy(NLMSG_DATA(nlh) + sizeof(int), registered_name,
++		       name_len);
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		err = sendmsg(sock_fd, &msg, 0);
++		printf("sendmsg returned %d\n", err);
++
++		free(nlh);
++	}
++}
++
++static void do_qualify(unsigned int seq, const char *data, size_t len)
++{
++	size_t measured_len;
++
++	printf("qualifying %s\n", data);
++	/* Sanity-check the name */
++	if (len < MAX_NAME_LEN)
++	{
++		for (measured_len = 0; data[measured_len] && measured_len < len;
++		     measured_len++)
++			;
++		if (!data[measured_len])
++		{
++			char name[MAX_NAME_LEN];
++
++			memcpy(name, data, measured_len + 1);
++			if (name[len - 1] == '.')
++			{
++				/* name is already fully qualified, just call
++				 * back with the same name.
++				 */
++				send_qualify_response(seq, name);
++			}
++			else
++			{
++				if (strlen(name) + strlen(_res.defdname) + 1 <
++				    MAX_NAME_LEN)
++				{
++					char full_name[MAX_NAME_LEN];
++
++					sprintf(full_name, "%s.%s.", name,
++						_res.defdname);
++					send_qualify_response(seq, full_name);
++				}
++				else
++					fprintf(stderr, "name too long\n");
++			}
++		}
++		else
++			fprintf(stderr, "query has unterminated name\n");
++	}
++	else
++		fprintf(stderr, "query has invalid name length %d\n",
++			len);
++}
++
++struct register_data
++{
++	unsigned int seq;
++	char name[MAX_NAME_LEN];
++	int num_v6_addresses;
++	struct in6_addr *v6_addresses;
++	int num_v4_addresses;
++	struct in_addr *v4_addresses;
++};
++
++static void *register_thread(void *arg)
++{
++	struct register_data *data = arg;
++	int len, msg_len, name_len, err, i;
++	struct nlmsghdr *nlh = NULL;
++	char registered_name[MAX_NAME_LEN];
++
++	printf("registering %s (seq %d)\n", data->name, data->seq);
++	printf("%d IPv6 addresses:\n", data->num_v6_addresses);
++	for (i = 0; i < data->num_v6_addresses; i++)
++		print_aaaa((const u_char *)&data->v6_addresses[i],
++			   sizeof(data->v6_addresses[i]),
++			   (const u_char *)data->v6_addresses,
++			   data->num_v6_addresses * sizeof(data->v6_addresses[i]));
++	printf("%d IPv4 addresses:\n", data->num_v4_addresses);
++	for (i = 0; i < data->num_v4_addresses; i++)
++		print_a((const u_char *)&data->v4_addresses[i],
++			sizeof(data->v4_addresses[i]),
++			(const u_char *)data->v4_addresses,
++			data->num_v4_addresses * sizeof(data->v4_addresses[i]));
++	res_init();
++	len = strlen(data->name);
++	/* len is guaranteed to be <= MAX_NAME_LEN, see do_register */
++	if (data->name[len - 1] == '.')
++	{
++		char host[MAX_NAME_LEN];
++		const char *dot;
++
++		/* Fully-qualified domain name, find domain */
++		dot = strchr(data->name, '.');
++		/* dot is guaranteed not to be NULL */
++		memcpy(host, data->name, dot - data->name);
++		host[dot - data->name] = 0;
++		printf("fully-qualified name %s in domain %s\n", host, dot + 1);
++		/* FIXME: actually register name, wait for response */
++		strcpy(registered_name, data->name);
++		err = 0;
++	}
++	else
++	{
++		printf("unqualified name %s, registering in domain %s\n",
++		       data->name, _res.defdname);
++		if (strlen(data->name) + strlen(_res.defdname) + 1 <
++		    MAX_NAME_LEN)
++		{
++			/* FIXME: actually register name, wait for response */
++			sprintf(registered_name, "%s.%s", data->name,
++				_res.defdname);
++			err = 0;
++		}
++		else
++			err = ENAMETOOLONG;
++	}
++
++	msg_len = 2 * sizeof(int);
++	name_len = strlen(registered_name);
++	if (!err)
++		msg_len += name_len;
++	nlh = malloc(NLMSG_SPACE(msg_len));
++	if (nlh)
++	{
++		struct sockaddr_nl dest_addr;
++		struct iovec iov;
++		struct msghdr msg;
++
++		/* Send a reply message */
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
++		nlh->nlmsg_type = NAME_STACK_REGISTER_REPLY;
++		nlh->nlmsg_flags = 0;
++		nlh->nlmsg_seq = data->seq;
++		nlh->nlmsg_pid = 0;
++		memcpy(NLMSG_DATA(nlh), &err, sizeof(err));
++		if (!err)
++		{
++			memcpy(NLMSG_DATA(nlh) + sizeof(int), &name_len,
++			       sizeof(name_len));
++			memcpy(NLMSG_DATA(nlh) + 2 * sizeof(int),
++			       registered_name, name_len);
++		}
++		else
++		{
++			int zero = 0;
++
++			memcpy(NLMSG_DATA(nlh) + sizeof(int), &zero,
++			       sizeof(zero));
++		}
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		sendmsg(sock_fd, &msg, 0);
++
++		free(nlh);
++	}
++	if (data->v6_addresses)
++		free(data->v6_addresses);
++	if (data->v4_addresses)
++		free(data->v4_addresses);
++	free(data);
++}
++
++static void do_register(unsigned int seq, const char *data, size_t len)
++{
++	size_t measured_len;
++
++	printf("got a register request with seq %d for %s (%d)\n", seq, data,
++	       len);
++	/* Sanity-check the name */
++	if (len <= MAX_NAME_LEN)
++	{
++		for (measured_len = 0; data[measured_len] && measured_len < len;
++		     measured_len++)
++			;
++		if (!data[measured_len])
++		{
++			struct register_data *qdata =
++				malloc(sizeof(struct register_data));
++
++			if (qdata)
++			{
++				pthread_t thread_id;
++				const char *ptr;
++
++				qdata->seq = seq;
++				memcpy(qdata->name, data, measured_len + 1);
++				ptr = data + measured_len + 1;
++				memcpy(&qdata->num_v6_addresses, ptr,
++				       sizeof(int));
++				ptr += sizeof(int);
++				if (qdata->num_v6_addresses) {
++					qdata->v6_addresses = malloc(
++ 						qdata->num_v6_addresses *
++ 						sizeof(struct in6_addr));
++ 					if (!qdata->v6_addresses) {
++ 						free(qdata);
++ 						fprintf(stderr,
++ 							"memory allocation failure, can't register name\n");
++ 						goto nak;
++ 					}
++ 					memcpy(qdata->v6_addresses, ptr,
++ 					       qdata->num_v6_addresses *
++ 					       sizeof(struct in6_addr));
++ 					ptr += qdata->num_v6_addresses *
++ 						sizeof(struct in6_addr);
++ 				}
++ 				else
++ 					qdata->v6_addresses = NULL;
++ 				memcpy(&qdata->num_v4_addresses, ptr,
++ 				       sizeof(int));
++ 				ptr += sizeof(int);
++ 				if (qdata->num_v4_addresses) {
++ 					qdata->v4_addresses = malloc(
++ 						qdata->num_v4_addresses *
++ 						sizeof(struct in_addr));
++ 					if (!qdata->v4_addresses) {
++ 						if (qdata->v6_addresses)
++ 							free(qdata->v6_addresses);
++ 						free(qdata);
++ 						fprintf(stderr,
++ 							"memory allocation failure, can't register name\n");
++ 						goto nak;
++ 					}
++ 					memcpy(qdata->v4_addresses, ptr,
++ 					       qdata->num_v4_addresses *
++ 						sizeof(struct in_addr));
++ 				}
++ 				else
++ 					qdata->v4_addresses = NULL;
++				if (pthread_create(&thread_id, NULL,
++				    register_thread, qdata))
++				{
++					fprintf(stderr,
++						"thread creation failed, can't resolve name\n");
++					free(qdata);
++					goto nak;
++				}
++			}
++			else
++			{
++				fprintf(stderr, "alloc failed, can't resolve name\n");
++				goto nak;
++			}
++		}
++		else
++		{
++			fprintf(stderr, "query has unterminated name\n");
++			goto nak;
++		}
++	}
++	else
++	{
++		fprintf(stderr, "query has invalid name length %d\n",
++			len);
++		goto nak;
++	}
++	return;
++
++nak:
++	/* FIXME: nak the name register request */
++	return;
++}
++
++static void *delete_registration_thread(void *arg)
++{
++	char *name = arg;
++	int len;
++
++	printf("deleting registration for %s\n", name);
++	res_init();
++	len = strlen(name);
++	/* len is guaranteed to be <= MAX_NAME_LEN, see do_delete_registration
++	 */
++	if (name[len - 1] == '.')
++	{
++		char host[MAX_NAME_LEN];
++		const char *dot;
++
++		/* Fully-qualified domain name, find domain */
++		dot = strchr(name, '.');
++		/* dot is guaranteed not to be NULL */
++		memcpy(host, name, dot - name);
++		host[dot - name] = 0;
++		printf("fully-qualified name %s in domain %s\n", host, dot + 1);
++		/* FIXME: actually delete the name registration */
++	}
++	else
++	{
++		printf("unqualified name %s, deleting from domain %s\n",
++		       name, _res.defdname);
++		if (strlen(name) + strlen(_res.defdname) + 1 < MAX_NAME_LEN)
++		{
++			/* FIXME: actually delete the name registration */
++		}
++	}
++
++	free(name);
++}
++
++static void do_delete_registration(unsigned int seq, const char *data,
++				   size_t len)
++{
++	size_t measured_len;
++
++	printf("got a register request with seq %d for %s (%d)\n", seq, data,
++	       len);
++	/* Sanity-check the name */
++	if (len <= MAX_NAME_LEN)
++	{
++		for (measured_len = 0; data[measured_len] && measured_len < len;
++		     measured_len++)
++			;
++		if (!data[measured_len])
++		{
++			char *name = malloc(measured_len);
++
++			if (name)
++			{
++				pthread_t thread_id;
++
++				memcpy(name, data, measured_len + 1);
++				if (pthread_create(&thread_id, NULL,
++				    delete_registration_thread, name))
++				{
++					fprintf(stderr,
++						"thread creation failed, can't resolve name\n");
++					free(name);
++				}
++			}
++			else
++				fprintf(stderr, "alloc failed, can't resolve name\n");
++		}
++		else
++			fprintf(stderr, "query has unterminated name\n");
++	}
++	else
++		fprintf(stderr, "query has invalid name length %d\n",
++			len);
++	return;
++}
++
++int run_daemon(void)
++{
++	res_init();
++	sock_fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_NAME_ORIENTED_STACK);
++	if (sock_fd >= 0) {
++		struct sockaddr_nl src_addr, dest_addr;
++		struct nlmsghdr *nlh = NULL;
++		struct iovec iov;
++		struct msghdr msg;
++		struct pollfd pfd;
++
++		memset(&src_addr, 0, sizeof(src_addr));
++		src_addr.nl_family = AF_NETLINK;
++		bind(sock_fd, (struct sockaddr*)&src_addr, sizeof(src_addr));
++
++		memset(&dest_addr, 0, sizeof(dest_addr));
++		dest_addr.nl_family = AF_NETLINK;
++
++		nlh = malloc(NLMSG_SPACE(MAX_PAYLOAD));
++		/* Send a register message
++		 * FIXME: the message is empty, do I really need MAX_PAYLOAD
++		 * data bytes?
++		 */
++		nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
++		nlh->nlmsg_type = NAME_STACK_REGISTER;
++		nlh->nlmsg_pid = 0;
++		nlh->nlmsg_flags = 0;
++		*(char *)NLMSG_DATA(nlh) = 0;
++
++		iov.iov_base = (void *)nlh;
++		iov.iov_len = nlh->nlmsg_len;
++		msg.msg_name = (void *)&dest_addr;
++		msg.msg_namelen = sizeof(dest_addr);
++		msg.msg_iov = &iov;
++		msg.msg_iovlen = 1;
++
++		sendmsg(sock_fd, &msg, 0);
++
++		/* Read message from kernel */
++		memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
++		recvmsg(sock_fd, &msg, 0);
++		/* FIXME: check that it's a reply */
++		printf("Received registration reply\n");
++
++		memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
++		pfd.fd = sock_fd;
++		pfd.events = POLLIN;
++		while (poll(&pfd, 1, -1)) {
++			recvmsg(sock_fd, &msg, 0);
++			switch (nlh->nlmsg_type)
++			{
++			case NAME_STACK_NAME_QUERY:
++				do_query(nlh->nlmsg_seq,
++					 NLMSG_DATA(nlh),
++					 NLMSG_PAYLOAD(nlh, 0));
++				break;
++			case NAME_STACK_QUALIFY_QUERY:
++				do_qualify(nlh->nlmsg_seq,
++					   NLMSG_DATA(nlh),
++					   NLMSG_PAYLOAD(nlh, 0));
++				break;
++			case NAME_STACK_REGISTER_QUERY:
++				do_register(nlh->nlmsg_seq,
++					    NLMSG_DATA(nlh),
++					    NLMSG_PAYLOAD(nlh, 0));
++				break;
++			case NAME_STACK_REGISTER_DELETE:
++				do_delete_registration(nlh->nlmsg_seq,
++						       NLMSG_DATA(nlh),
++						       NLMSG_PAYLOAD(nlh, 0));
++				break;
++			default:
++				fprintf(stderr, "unhandled msg type %d\n",
++					nlh->nlmsg_type);
++			}
++			memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
++		}
++		/* Close Netlink Socket */
++		close(sock_fd);
++	}
++	return 0;
++}
+diff --git a/daemon.h b/daemon.h
+new file mode 100644
+index 0000000..ffe3636
+--- /dev/null
++++ b/daemon.h
+@@ -0,0 +1,14 @@
++#ifndef __DAEMON_H__
++#define __DAEMON_H__
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int run_daemon(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __DAEMON_H__ */
+diff --git a/main.c b/main.c
+index 4184dad..aebd12b 100644
+--- a/main.c
++++ b/main.c
+@@ -1,673 +1,11 @@
+-#include <sys/types.h>
+-#include <netinet/in.h>
+-#define BIND_8_COMPAT
+-#include <arpa/nameser.h>
+-#include <resolv.h>
+-#include <netdb.h>
+-#include <sys/socket.h>
+-#include <linux/netlink.h>
+-#include <errno.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <poll.h>
+-#include "dns.h"
+-#include "namestacknl.h"
+-
+-#define MAX_PAYLOAD 1024  /* maximum payload size*/
+-
+-int sock_fd;
+-
+-#define MAX_NAME_LEN 254
+-
+-static void print_a(const u_char *ptr, uint16_t rdlength,
+- const u_char *start, uint16_t len)
+-{
+-    if (rdlength != sizeof(uint32_t))
+-        fprintf(stderr, "address record has invalid length %d\n", rdlength);
+-     else if (ptr + rdlength - start > len)
+-         fprintf(stderr, "address record overflows buffer\n");
+-    else
+-    {
+-        uint32_t addr = *(uint32_t *)ptr;
+-        u_char *addrp;
+-
+-        for (addrp = (u_char *)&addr;
+-         addrp - (u_char *)&addr < sizeof(uint32_t);
+-         addrp++)
+-        {
+-            if (addrp == (u_char *)&addr + sizeof(uint32_t) - 1)
+-                printf("%d\n", *addrp);
+-            else
+-                printf("%d.", *addrp);
+-        }
+-    }
+-}
+-
+-#ifndef s6_addr16
+-#define s6_addr16   __u6_addr.__u6_addr16
+-#endif
+-
+-static void print_aaaa(const u_char *ptr, uint16_t rdlength,
+- const u_char *start, uint16_t len)
+-{
+-    if (rdlength != sizeof(struct in6_addr))
+-        fprintf(stderr, "address record has invalid length %d\n", rdlength);
+-     else if (ptr + rdlength - start > len)
+-         fprintf(stderr, "address record overflows buffer\n");
+-    else
+-    {
+-        struct in6_addr *addr = (struct in6_addr *)ptr;
+-        int i, in_zero = 0;
+-
+-        for (i = 0; i < 7; i++)
+-        {
+-            if (!addr->s6_addr16[i])
+-            {
+-                if (!in_zero)
+-                {
+-                    printf(":");
+-                    in_zero = 1;
+-                }
+-            }
+-            else
+-            {
+-                printf("%x:", ntohs(addr->s6_addr16[i]));
+-                in_zero = 0;
+-            }
+-        }
+-        printf("%x\n", ntohs(addr->s6_addr16[7]));
+-    }
+-}
+-
+-struct query_data
+-{
+-	unsigned int seq;
+-	char name[MAX_NAME_LEN];
+-};
+-
+-static void *query_thread(void *arg)
+-{
+-	struct query_data *data = arg;
+-	u_char buf[PACKETSZ];
+-	int len, msg_len, found_response = 0;
+-	struct nlmsghdr *nlh = NULL;
+-	uint16_t rdlength;
+-	const u_char *rdata;
+-
+-	printf("querying %s (seq %d)\n", data->name, data->seq);
+-	len = res_query(data->name, C_IN, T_AAAA, buf, sizeof(buf));
+-	if (len >= 0)
+-	{
+-		found_response = !find_answer_of_type(buf, len, T_AAAA, 0,
+-						      &rdlength, &rdata);
+-		if (found_response)
+-		{
+-			printf("found a valid IPv6 address\n");
+-			print_aaaa(rdata, rdlength, buf, len);
+-		}
+-	}
+-	if (!found_response)
+-	{
+-		len = res_query(data->name, C_IN, T_A, buf, sizeof(buf));
+-		if (len >= 0)
+-		{
+-			found_response = !find_answer_of_type(buf, len, T_A, 0,
+-							      &rdlength,
+-							      &rdata);
+-			if (found_response)
+-			{
+-				printf("found a valid IPv4 address\n");
+-				print_a(rdata, rdlength, buf, len);
+-			}
+-		}
+-	}
+-	if (!found_response)
+-		printf("couldn't resolve %s: %d\n", data->name, h_errno);
+-
+-	msg_len = sizeof(int);
+-	if (len > 0)
+-		msg_len += len;
+-	nlh = malloc(NLMSG_SPACE(msg_len));
+-	if (nlh)
+-	{
+-		struct sockaddr_nl dest_addr;
+-		struct iovec iov;
+-		struct msghdr msg;
+-
+-		/* Send a reply message */
+-		memset(&dest_addr, 0, sizeof(dest_addr));
+-		dest_addr.nl_family = AF_NETLINK;
+-
+-		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
+-		nlh->nlmsg_type = NAME_STACK_NAME_REPLY;
+-		nlh->nlmsg_flags = 0;
+-		nlh->nlmsg_seq = data->seq;
+-		nlh->nlmsg_pid = 0;
+-		memcpy(NLMSG_DATA(nlh), &len, sizeof(len));
+-		if (len > 0)
+-			memcpy(NLMSG_DATA(nlh) + sizeof(len), buf, len);
+-
+-		iov.iov_base = (void *)nlh;
+-		iov.iov_len = nlh->nlmsg_len;
+-		msg.msg_name = (void *)&dest_addr;
+-		msg.msg_namelen = sizeof(dest_addr);
+-		msg.msg_iov = &iov;
+-		msg.msg_iovlen = 1;
+-
+-		sendmsg(sock_fd, &msg, 0);
+-
+-		free(nlh);
+-	}
+-	free(data);
+-}
+-
+-static void do_query(unsigned int seq, const char *data, size_t len)
+-{
+-	size_t measured_len;
+-
+-	printf("got a query request with seq %d for %s (%d)\n", seq, data, len);
+-	/* Sanity-check the name */
+-	if (len <= MAX_NAME_LEN)
+-	{
+-		for (measured_len = 0; data[measured_len] && measured_len < len;
+-		     measured_len++)
+-			;
+-		if (!data[measured_len])
+-		{
+-			struct query_data *qdata =
+-				malloc(sizeof(struct query_data));
+-
+-			if (qdata)
+-			{
+-				pthread_t thread_id;
+-
+-				qdata->seq = seq;
+-				memcpy(qdata->name, data, measured_len + 1);
+-				if (pthread_create(&thread_id, NULL,
+-				    query_thread, qdata))
+-				{
+-					fprintf(stderr,
+-						"thread creation failed, can't resolve name\n");
+-					free(qdata);
+-				}
+-			}
+-			else
+-				fprintf(stderr, "alloc failed, can't resolve name\n");
+-		}
+-		else
+-			fprintf(stderr, "query has unterminated name\n");
+-	}
+-	else
+-		fprintf(stderr, "query has invalid name length %d\n",
+-			len);
+-}
+-
+-static void send_qualify_response(unsigned int seq, const char *registered_name)
+-{
+-	int msg_len, name_len;
+-	struct nlmsghdr *nlh = NULL;
+-
+-	printf("qualified as %s\n", registered_name);
+-	name_len = strlen(registered_name);
+-	msg_len = sizeof(int) + name_len;
+-	nlh = malloc(NLMSG_SPACE(msg_len));
+-	if (nlh)
+-	{
+-		struct sockaddr_nl dest_addr;
+-		struct iovec iov;
+-		struct msghdr msg;
+-		int err;
+-
+-		/* Send a reply message */
+-		memset(&dest_addr, 0, sizeof(dest_addr));
+-		dest_addr.nl_family = AF_NETLINK;
+-
+-		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
+-		nlh->nlmsg_type = NAME_STACK_QUALIFY_REPLY;
+-		nlh->nlmsg_flags = 0;
+-		nlh->nlmsg_seq = seq;
+-		nlh->nlmsg_pid = 0;
+-		memcpy(NLMSG_DATA(nlh), &name_len, sizeof(name_len));
+-		memcpy(NLMSG_DATA(nlh) + sizeof(int), registered_name,
+-		       name_len);
+-
+-		iov.iov_base = (void *)nlh;
+-		iov.iov_len = nlh->nlmsg_len;
+-		msg.msg_name = (void *)&dest_addr;
+-		msg.msg_namelen = sizeof(dest_addr);
+-		msg.msg_iov = &iov;
+-		msg.msg_iovlen = 1;
+-
+-		err = sendmsg(sock_fd, &msg, 0);
+-		printf("sendmsg returned %d\n", err);
+-
+-		free(nlh);
+-	}
+-}
+-
+-static void do_qualify(unsigned int seq, const char *data, size_t len)
+-{
+-	size_t measured_len;
+-
+-	printf("qualifying %s\n", data);
+-	/* Sanity-check the name */
+-	if (len < MAX_NAME_LEN)
+-	{
+-		for (measured_len = 0; data[measured_len] && measured_len < len;
+-		     measured_len++)
+-			;
+-		if (!data[measured_len])
+-		{
+-			char name[MAX_NAME_LEN];
+-
+-			memcpy(name, data, measured_len + 1);
+-			if (name[len - 1] == '.')
+-			{
+-				/* name is already fully qualified, just call
+-				 * back with the same name.
+-				 */
+-				send_qualify_response(seq, name);
+-			}
+-			else
+-			{
+-				if (strlen(name) + strlen(_res.defdname) + 1 <
+-				    MAX_NAME_LEN)
+-				{
+-					char full_name[MAX_NAME_LEN];
+-
+-					sprintf(full_name, "%s.%s.", name,
+-						_res.defdname);
+-					send_qualify_response(seq, full_name);
+-				}
+-				else
+-					fprintf(stderr, "name too long\n");
+-			}
+-		}
+-		else
+-			fprintf(stderr, "query has unterminated name\n");
+-	}
+-	else
+-		fprintf(stderr, "query has invalid name length %d\n",
+-			len);
+-}
+-
+-struct register_data
+-{
+-	unsigned int seq;
+-	char name[MAX_NAME_LEN];
+-	int num_v6_addresses;
+-	struct in6_addr *v6_addresses;
+-	int num_v4_addresses;
+-	struct in_addr *v4_addresses;
+-};
+-
+-static void *register_thread(void *arg)
+-{
+-	struct register_data *data = arg;
+-	int len, msg_len, name_len, err, i;
+-	struct nlmsghdr *nlh = NULL;
+-	char registered_name[MAX_NAME_LEN];
+-
+-	printf("registering %s (seq %d)\n", data->name, data->seq);
+-	printf("%d IPv6 addresses:\n", data->num_v6_addresses);
+-	for (i = 0; i < data->num_v6_addresses; i++)
+-		print_aaaa((const u_char *)&data->v6_addresses[i],
+-			   sizeof(data->v6_addresses[i]),
+-			   (const u_char *)data->v6_addresses,
+-			   data->num_v6_addresses * sizeof(data->v6_addresses[i]));
+-	printf("%d IPv4 addresses:\n", data->num_v4_addresses);
+-	for (i = 0; i < data->num_v4_addresses; i++)
+-		print_a((const u_char *)&data->v4_addresses[i],
+-			sizeof(data->v4_addresses[i]),
+-			(const u_char *)data->v4_addresses,
+-			data->num_v4_addresses * sizeof(data->v4_addresses[i]));
+-	res_init();
+-	len = strlen(data->name);
+-	/* len is guaranteed to be <= MAX_NAME_LEN, see do_register */
+-	if (data->name[len - 1] == '.')
+-	{
+-		char host[MAX_NAME_LEN];
+-		const char *dot;
+-
+-		/* Fully-qualified domain name, find domain */
+-		dot = strchr(data->name, '.');
+-		/* dot is guaranteed not to be NULL */
+-		memcpy(host, data->name, dot - data->name);
+-		host[dot - data->name] = 0;
+-		printf("fully-qualified name %s in domain %s\n", host, dot + 1);
+-		/* FIXME: actually register name, wait for response */
+-		strcpy(registered_name, data->name);
+-		err = 0;
+-	}
+-	else
+-	{
+-		printf("unqualified name %s, registering in domain %s\n",
+-		       data->name, _res.defdname);
+-		if (strlen(data->name) + strlen(_res.defdname) + 1 <
+-		    MAX_NAME_LEN)
+-		{
+-			/* FIXME: actually register name, wait for response */
+-			sprintf(registered_name, "%s.%s", data->name,
+-				_res.defdname);
+-			err = 0;
+-		}
+-		else
+-			err = ENAMETOOLONG;
+-	}
+-
+-	msg_len = 2 * sizeof(int);
+-	name_len = strlen(registered_name);
+-	if (!err)
+-		msg_len += name_len;
+-	nlh = malloc(NLMSG_SPACE(msg_len));
+-	if (nlh)
+-	{
+-		struct sockaddr_nl dest_addr;
+-		struct iovec iov;
+-		struct msghdr msg;
+-
+-		/* Send a reply message */
+-		memset(&dest_addr, 0, sizeof(dest_addr));
+-		dest_addr.nl_family = AF_NETLINK;
+-
+-		nlh->nlmsg_len = NLMSG_SPACE(msg_len);
+-		nlh->nlmsg_type = NAME_STACK_REGISTER_REPLY;
+-		nlh->nlmsg_flags = 0;
+-		nlh->nlmsg_seq = data->seq;
+-		nlh->nlmsg_pid = 0;
+-		memcpy(NLMSG_DATA(nlh), &err, sizeof(err));
+-		if (!err)
+-		{
+-			memcpy(NLMSG_DATA(nlh) + sizeof(int), &name_len,
+-			       sizeof(name_len));
+-			memcpy(NLMSG_DATA(nlh) + 2 * sizeof(int),
+-			       registered_name, name_len);
+-		}
+-		else
+-		{
+-			int zero = 0;
+-
+-			memcpy(NLMSG_DATA(nlh) + sizeof(int), &zero,
+-			       sizeof(zero));
+-		}
+-
+-		iov.iov_base = (void *)nlh;
+-		iov.iov_len = nlh->nlmsg_len;
+-		msg.msg_name = (void *)&dest_addr;
+-		msg.msg_namelen = sizeof(dest_addr);
+-		msg.msg_iov = &iov;
+-		msg.msg_iovlen = 1;
+-
+-		sendmsg(sock_fd, &msg, 0);
+-
+-		free(nlh);
+-	}
+-	if (data->v6_addresses)
+-		free(data->v6_addresses);
+-	if (data->v4_addresses)
+-		free(data->v4_addresses);
+-	free(data);
+-}
+-
+-static void do_register(unsigned int seq, const char *data, size_t len)
+-{
+-	size_t measured_len;
+-
+-	printf("got a register request with seq %d for %s (%d)\n", seq, data,
+-	       len);
+-	/* Sanity-check the name */
+-	if (len <= MAX_NAME_LEN)
+-	{
+-		for (measured_len = 0; data[measured_len] && measured_len < len;
+-		     measured_len++)
+-			;
+-		if (!data[measured_len])
+-		{
+-			struct register_data *qdata =
+-				malloc(sizeof(struct register_data));
+-
+-			if (qdata)
+-			{
+-				pthread_t thread_id;
+-				const char *ptr;
+-
+-				qdata->seq = seq;
+-				memcpy(qdata->name, data, measured_len + 1);
+-				ptr = data + measured_len + 1;
+-				memcpy(&qdata->num_v6_addresses, ptr,
+-				       sizeof(int));
+-				ptr += sizeof(int);
+-				if (qdata->num_v6_addresses) {
+-					qdata->v6_addresses = malloc(
+- 						qdata->num_v6_addresses *
+- 						sizeof(struct in6_addr));
+- 					if (!qdata->v6_addresses) {
+- 						free(qdata);
+- 						fprintf(stderr,
+- 							"memory allocation failure, can't register name\n");
+- 						goto nak;
+- 					}
+- 					memcpy(qdata->v6_addresses, ptr,
+- 					       qdata->num_v6_addresses *
+- 					       sizeof(struct in6_addr));
+- 					ptr += qdata->num_v6_addresses *
+- 						sizeof(struct in6_addr);
+- 				}
+- 				else
+- 					qdata->v6_addresses = NULL;
+- 				memcpy(&qdata->num_v4_addresses, ptr,
+- 				       sizeof(int));
+- 				ptr += sizeof(int);
+- 				if (qdata->num_v4_addresses) {
+- 					qdata->v4_addresses = malloc(
+- 						qdata->num_v4_addresses *
+- 						sizeof(struct in_addr));
+- 					if (!qdata->v4_addresses) {
+- 						if (qdata->v6_addresses)
+- 							free(qdata->v6_addresses);
+- 						free(qdata);
+- 						fprintf(stderr,
+- 							"memory allocation failure, can't register name\n");
+- 						goto nak;
+- 					}
+- 					memcpy(qdata->v4_addresses, ptr,
+- 					       qdata->num_v4_addresses *
+- 						sizeof(struct in_addr));
+- 				}
+- 				else
+- 					qdata->v4_addresses = NULL;
+-				if (pthread_create(&thread_id, NULL,
+-				    register_thread, qdata))
+-				{
+-					fprintf(stderr,
+-						"thread creation failed, can't resolve name\n");
+-					free(qdata);
+-					goto nak;
+-				}
+-			}
+-			else
+-			{
+-				fprintf(stderr, "alloc failed, can't resolve name\n");
+-				goto nak;
+-			}
+-		}
+-		else
+-		{
+-			fprintf(stderr, "query has unterminated name\n");
+-			goto nak;
+-		}
+-	}
+-	else
+-	{
+-		fprintf(stderr, "query has invalid name length %d\n",
+-			len);
+-		goto nak;
+-	}
+-	return;
+-
+-nak:
+-	/* FIXME: nak the name register request */
+-	return;
+-}
+-
+-static void *delete_registration_thread(void *arg)
+-{
+-	char *name = arg;
+-	int len;
+-
+-	printf("deleting registration for %s\n", name);
+-	res_init();
+-	len = strlen(name);
+-	/* len is guaranteed to be <= MAX_NAME_LEN, see do_delete_registration
+-	 */
+-	if (name[len - 1] == '.')
+-	{
+-		char host[MAX_NAME_LEN];
+-		const char *dot;
+-
+-		/* Fully-qualified domain name, find domain */
+-		dot = strchr(name, '.');
+-		/* dot is guaranteed not to be NULL */
+-		memcpy(host, name, dot - name);
+-		host[dot - name] = 0;
+-		printf("fully-qualified name %s in domain %s\n", host, dot + 1);
+-		/* FIXME: actually delete the name registration */
+-	}
+-	else
+-	{
+-		printf("unqualified name %s, deleting from domain %s\n",
+-		       name, _res.defdname);
+-		if (strlen(name) + strlen(_res.defdname) + 1 < MAX_NAME_LEN)
+-		{
+-			/* FIXME: actually delete the name registration */
+-		}
+-	}
+-
+-	free(name);
+-}
+-
+-static void do_delete_registration(unsigned int seq, const char *data,
+-				   size_t len)
+-{
+-	size_t measured_len;
+-
+-	printf("got a register request with seq %d for %s (%d)\n", seq, data,
+-	       len);
+-	/* Sanity-check the name */
+-	if (len <= MAX_NAME_LEN)
+-	{
+-		for (measured_len = 0; data[measured_len] && measured_len < len;
+-		     measured_len++)
+-			;
+-		if (!data[measured_len])
+-		{
+-			char *name = malloc(measured_len);
+-
+-			if (name)
+-			{
+-				pthread_t thread_id;
+-
+-				memcpy(name, data, measured_len + 1);
+-				if (pthread_create(&thread_id, NULL,
+-				    delete_registration_thread, name))
+-				{
+-					fprintf(stderr,
+-						"thread creation failed, can't resolve name\n");
+-					free(name);
+-				}
+-			}
+-			else
+-				fprintf(stderr, "alloc failed, can't resolve name\n");
+-		}
+-		else
+-			fprintf(stderr, "query has unterminated name\n");
+-	}
+-	else
+-		fprintf(stderr, "query has invalid name length %d\n",
+-			len);
+-	return;
+-}
++#include "daemon.h"
+ 
+ int main(int argc, const char *argv[])
+ {
+-	res_init();
+-	sock_fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_NAME_ORIENTED_STACK);
+-	if (sock_fd >= 0) {
+-		struct sockaddr_nl src_addr, dest_addr;
+-		struct nlmsghdr *nlh = NULL;
+-		struct iovec iov;
+-		struct msghdr msg;
+-		struct pollfd pfd;
+-
+-		memset(&src_addr, 0, sizeof(src_addr));
+-		src_addr.nl_family = AF_NETLINK;
+-		bind(sock_fd, (struct sockaddr*)&src_addr, sizeof(src_addr));
+-
+-		memset(&dest_addr, 0, sizeof(dest_addr));
+-		dest_addr.nl_family = AF_NETLINK;
+-
+-		nlh = malloc(NLMSG_SPACE(MAX_PAYLOAD));
+-		/* Send a register message
+-		 * FIXME: the message is empty, do I really need MAX_PAYLOAD
+-		 * data bytes?
+-		 */
+-		nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
+-		nlh->nlmsg_type = NAME_STACK_REGISTER;
+-		nlh->nlmsg_pid = 0;
+-		nlh->nlmsg_flags = 0;
+-		*(char *)NLMSG_DATA(nlh) = 0;
+-
+-		iov.iov_base = (void *)nlh;
+-		iov.iov_len = nlh->nlmsg_len;
+-		msg.msg_name = (void *)&dest_addr;
+-		msg.msg_namelen = sizeof(dest_addr);
+-		msg.msg_iov = &iov;
+-		msg.msg_iovlen = 1;
+-
+-		sendmsg(sock_fd, &msg, 0);
+-
+-		/* Read message from kernel */
+-		memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
+-		recvmsg(sock_fd, &msg, 0);
+-		/* FIXME: check that it's a reply */
+-		printf("Received registration reply\n");
++	int ret;
+ 
+-		memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
+-		pfd.fd = sock_fd;
+-		pfd.events = POLLIN;
+-		while (poll(&pfd, 1, -1)) {
+-			recvmsg(sock_fd, &msg, 0);
+-			switch (nlh->nlmsg_type)
+-			{
+-			case NAME_STACK_NAME_QUERY:
+-				do_query(nlh->nlmsg_seq,
+-					 NLMSG_DATA(nlh),
+-					 NLMSG_PAYLOAD(nlh, 0));
+-				break;
+-			case NAME_STACK_QUALIFY_QUERY:
+-				do_qualify(nlh->nlmsg_seq,
+-					   NLMSG_DATA(nlh),
+-					   NLMSG_PAYLOAD(nlh, 0));
+-				break;
+-			case NAME_STACK_REGISTER_QUERY:
+-				do_register(nlh->nlmsg_seq,
+-					    NLMSG_DATA(nlh),
+-					    NLMSG_PAYLOAD(nlh, 0));
+-				break;
+-			case NAME_STACK_REGISTER_DELETE:
+-				do_delete_registration(nlh->nlmsg_seq,
+-						       NLMSG_DATA(nlh),
+-						       NLMSG_PAYLOAD(nlh, 0));
+-				break;
+-			default:
+-				fprintf(stderr, "unhandled msg type %d\n",
+-					nlh->nlmsg_type);
+-			}
+-			memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
+-		}
+-		/* Close Netlink Socket */
+-		close(sock_fd);
+-	}
+-	return 0;
++	ret = run_daemon();
++	if (ret < 0)
++		perror("running daemon failed");
++	return ret;
+ }
+-- 
+1.6.3.2
+

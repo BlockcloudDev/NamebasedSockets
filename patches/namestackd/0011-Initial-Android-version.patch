@@ -1,0 +1,71 @@
+From 82797df2a03d3d1d2838dab450b095b41242c4a5 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:33:01 -0700
+Subject: [PATCH 11/21] Initial Android version
+
+---
+ Android.mk          |    8 ++++++++
+ NameStackDaemon.cpp |    8 ++++++++
+ namestacknl.h       |   20 ++++++++++++++++++++
+ 3 files changed, 36 insertions(+), 0 deletions(-)
+ create mode 100644 Android.mk
+ create mode 100644 NameStackDaemon.cpp
+ create mode 100644 namestacknl.h
+
+diff --git a/Android.mk b/Android.mk
+new file mode 100644
+index 0000000..2a3d3b2
+--- /dev/null
++++ b/Android.mk
+@@ -0,0 +1,8 @@
++LOCAL_PATH := $(call my-dir)
++
++include $(CLEAR_VARS)
++
++LOCAL_MODULE := namestackd
++LOCAL_SRC_FILES := daemon.c NameStackDaemon.cpp
++
++include $(BUILD_SHARED_LIBRARY)
+diff --git a/NameStackDaemon.cpp b/NameStackDaemon.cpp
+new file mode 100644
+index 0000000..4519447
+--- /dev/null
++++ b/NameStackDaemon.cpp
+@@ -0,0 +1,8 @@
++#include <jni.h>
++#include "daemon.h"
++
++void
++Java_com_ericsson_namestackd_NameStackDaemon_Run(JNIEnv *env, jobject obj)
++{
++    run_daemon();
++}
+diff --git a/namestacknl.h b/namestacknl.h
+new file mode 100644
+index 0000000..1ecb5cc
+--- /dev/null
++++ b/namestacknl.h
+@@ -0,0 +1,20 @@
++#ifndef NAMESTACKNL_H
++#define NAMESTACKNL_H
++
++/* Message types */
++enum {
++    NAME_STACK_REGISTER,
++    /* FIXME: a QUERY is sent by the kernel to the daemon, and never
++     * vice-versa.  Should I separate message types by the direction they're
++     * sent?
++     */
++    NAME_STACK_NAME_QUERY,
++    NAME_STACK_NAME_REPLY,
++    NAME_STACK_QUALIFY_QUERY,
++    NAME_STACK_QUALIFY_REPLY,
++    NAME_STACK_REGISTER_QUERY,
++    NAME_STACK_REGISTER_REPLY,
++    NAME_STACK_REGISTER_DELETE
++};
++
++#endif
+-- 
+1.6.3.2
+

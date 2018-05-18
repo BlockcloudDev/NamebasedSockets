@@ -1,0 +1,96 @@
+From a910af9a979777d55aa237649be2c26999265b16 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:47:06 -0700
+Subject: [PATCH] Store the registered name in the socket upon success
+
+---
+ af_name.c        |   15 +++++++--------
+ main.c           |   13 ++++++++++++-
+ namestack_priv.h |    2 +-
+ 3 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 0703009..5b56622 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -111,7 +111,7 @@ out:
+ 	return 0;
+ }
+ 
+-static void name_bind_cb(int result, void *data)
++static void name_bind_cb(int result, const char *bound_name, void *data)
+ {
+ 	struct socket *sock = data;
+ 	struct sock *sk = sock->sk;
+@@ -121,14 +121,13 @@ static void name_bind_cb(int result, void *data)
+ 	name->async_error = -result;
+ 	if (!result)
+ 	{
+-		/* FIXME: need to:
+-		 * 1. Attempt to bind to the specified port on each transport
+-		 *    socket.  Unfortunately none may exist at the moment,
+-		 *    because they're not created except in connect.  That
+-		 *    needs to be fixed too.
+-		 * 2. Copy the name into the source name (easy, but the
+-		 *    fully-qualified name should be in the reply.)
++		/* FIXME: need attempt to bind to the specified port on each
++		 * transport socket.  Unfortunately none may exist at the
++		 * moment, because they're not created except in connect.
++		 * That needs to be fixed too.
+ 		 */
++		printk(KERN_INFO "bound to %s\n", bound_name);
++		strcpy(name->sname.sname_addr.name, bound_name);
+ 	}
+ }
+ 
+diff --git a/main.c b/main.c
+index e74bda1..18adc0e 100644
+--- a/main.c
++++ b/main.c
+@@ -185,6 +185,8 @@ handle_name_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ 		NAME_STACK_NAME_REPLY, NULL, 0);
+ }
+ 
++#define MAX_NAME_LEN 256
++
+ static int
+ handle_register_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ {
+@@ -201,11 +203,20 @@ handle_register_reply(const struct sk_buff *skb, const struct nlmsghdr *nlh)
+ 		printk(KERN_INFO "found reply on pending queue\n");
+ 		if (NLMSG_PAYLOAD(nlh, 0) >= sizeof(result))
+ 		{
++			int name_len;
++			char name_buf[MAX_NAME_LEN];
+ 			register_cb cb = node->cb;
+ 
+ 			memcpy(&result, NLMSG_DATA(nlh), sizeof(result));
++			memcpy(&name_len, NLMSG_DATA(nlh) + sizeof(int),
++			       sizeof(int));
++			if (name_len)
++				memcpy(name_buf,
++				       NLMSG_DATA(nlh) + 2 * sizeof(int),
++				       name_len);
++			name_buf[name_len] = 0;
+ 			printk(KERN_INFO "result is %d\n", result);
+-			cb(result, node->data);
++			cb(result, name_buf, node->data);
+ 		}
+ 		else
+ 			printk(KERN_WARNING
+diff --git a/namestack_priv.h b/namestack_priv.h
+index d134859..8edb72e 100644
+--- a/namestack_priv.h
++++ b/namestack_priv.h
+@@ -13,7 +13,7 @@ int name_send_query(const char *name, query_resolv_cb cb, void *data);
+ void name_cancel_query(void *data);
+ 
+ /* Name registration (bind()/DNS update) functions */
+-typedef void (*register_cb)(int result, void *data);
++typedef void (*register_cb)(int result, const char *name, void *data);
+ int name_send_registration(const char *name, register_cb cb, void *data);
+ void name_delete_registration(const char *name);
+ 
+-- 
+1.6.0.4
+

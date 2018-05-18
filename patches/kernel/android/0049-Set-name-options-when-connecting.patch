@@ -1,0 +1,307 @@
+From a51e4b3cbadd54ed21f747a3383ccabfb7722d9d Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:54:41 -0700
+Subject: [PATCH 49/67] Set name options when connecting
+
+---
+ net/namestack/af_name.c |  265 ++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 264 insertions(+), 1 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 6329c7c..a342579 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -1,11 +1,14 @@
+ #include <linux/types.h>
+ #include <linux/socket.h>
+ #include <linux/in.h>
++#include <linux/ipv6.h>
+ #include <linux/net.h>
+ #include <linux/module.h>
+ #include <net/sock.h>
+ #include <net/inet_connection_sock.h>
++#include <net/ipv6.h>
+ #include <net/tcp_states.h>
++#include <net/transp_v6.h>
+ #include <linux/inname.h>
+ #include "dns.h"
+ #include "nameser.h"
+@@ -131,6 +134,253 @@ static int name_bind_ipv6(struct socket *sock, const char *fqdn, __be16 port,
+ 	return kernel_bind(sock, (struct sockaddr *)&sin, sizeof(sin));
+ }
+ 
++/* Stolen from net/ipv6/ipv6_sockglue.c */
++static
++struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
++					   struct ipv6_txoptions *opt)
++{
++	if (inet_sk(sk)->is_icsk) {
++		/* The original version of this only updates the options if the
++		 * socket is not listening or closed, but I want the options to
++		 * be set even on SYN/SYN-ACK packets, so I update the socket
++		 * irrespective of state.
++		 */
++		if (opt) {
++			struct inet_connection_sock *icsk = inet_csk(sk);
++			icsk->icsk_ext_hdr_len = opt->opt_flen + opt->opt_nflen;
++			icsk->icsk_sync_mss(sk, icsk->icsk_pmtu_cookie);
++		}
++		opt = xchg(&inet6_sk(sk)->opt, opt);
++	} else {
++		write_lock(&sk->sk_dst_lock);
++		opt = xchg(&inet6_sk(sk)->opt, opt);
++		write_unlock(&sk->sk_dst_lock);
++	}
++	sk_dst_reset(sk);
++
++	return opt;
++}
++
++/* Stolen from net/ipv6/exthdrs.c.  That one takes an ipv6_opt_hdr from user-
++ * space, but this doesn't, so the copy_from_user is removed.
++ */
++static int ipv6_renew_option(void *ohdr,
++			     struct ipv6_opt_hdr *newopt, int newoptlen,
++			     int inherit,
++			     struct ipv6_opt_hdr **hdr,
++			     char **p)
++{
++	if (inherit) {
++		if (ohdr) {
++			memcpy(*p, ohdr, ipv6_optlen((struct ipv6_opt_hdr *)ohdr));
++			*hdr = (struct ipv6_opt_hdr *)*p;
++			*p += CMSG_ALIGN(ipv6_optlen(*(struct ipv6_opt_hdr **)hdr));
++		}
++	} else {
++		if (newopt) {
++			memcpy(*p, newopt, newoptlen);
++			*hdr = (struct ipv6_opt_hdr *)*p;
++			*p += CMSG_ALIGN(newoptlen);
++		}
++	}
++	return 0;
++}
++
++/* Identical to ipv6_renew_options in net/ipv6/exthdrs.c, but calls the
++ * modified ipv6_renew_option (above).
++ */
++struct ipv6_txoptions *
++namestack_ipv6_renew_options(struct sock *sk, struct ipv6_txoptions *opt,
++		   int newtype,
++		   struct ipv6_opt_hdr *newopt, int newoptlen)
++{
++	int tot_len = 0;
++	char *p;
++	struct ipv6_txoptions *opt2;
++	int err;
++
++	if (opt) {
++		if (newtype != IPV6_HOPOPTS && opt->hopopt)
++			tot_len += CMSG_ALIGN(ipv6_optlen(opt->hopopt));
++		if (newtype != IPV6_RTHDRDSTOPTS && opt->dst0opt)
++			tot_len += CMSG_ALIGN(ipv6_optlen(opt->dst0opt));
++		if (newtype != IPV6_RTHDR && opt->srcrt)
++			tot_len += CMSG_ALIGN(ipv6_optlen(opt->srcrt));
++		if (newtype != IPV6_DSTOPTS && opt->dst1opt)
++			tot_len += CMSG_ALIGN(ipv6_optlen(opt->dst1opt));
++	}
++
++	if (newopt && newoptlen)
++		tot_len += CMSG_ALIGN(newoptlen);
++
++	if (!tot_len)
++		return NULL;
++
++	tot_len += sizeof(*opt2);
++	opt2 = sock_kmalloc(sk, tot_len, GFP_ATOMIC);
++	if (!opt2)
++		return ERR_PTR(-ENOBUFS);
++
++	memset(opt2, 0, tot_len);
++
++	opt2->tot_len = tot_len;
++	p = (char *)(opt2 + 1);
++
++	err = ipv6_renew_option(opt ? opt->hopopt : NULL, newopt, newoptlen,
++				newtype != IPV6_HOPOPTS,
++				&opt2->hopopt, &p);
++	if (err)
++		goto out;
++
++	err = ipv6_renew_option(opt ? opt->dst0opt : NULL, newopt, newoptlen,
++				newtype != IPV6_RTHDRDSTOPTS,
++				&opt2->dst0opt, &p);
++	if (err)
++		goto out;
++
++	err = ipv6_renew_option(opt ? opt->srcrt : NULL, newopt, newoptlen,
++				newtype != IPV6_RTHDR,
++				(struct ipv6_opt_hdr **)&opt2->srcrt, &p);
++	if (err)
++		goto out;
++
++	err = ipv6_renew_option(opt ? opt->dst1opt : NULL, newopt, newoptlen,
++				newtype != IPV6_DSTOPTS,
++				&opt2->dst1opt, &p);
++	if (err)
++		goto out;
++
++	opt2->opt_nflen = (opt2->hopopt ? ipv6_optlen(opt2->hopopt) : 0) +
++			  (opt2->dst0opt ? ipv6_optlen(opt2->dst0opt) : 0) +
++			  (opt2->srcrt ? ipv6_optlen(opt2->srcrt) : 0);
++	opt2->opt_flen = (opt2->dst1opt ? ipv6_optlen(opt2->dst1opt) : 0);
++
++	return opt2;
++out:
++	sock_kfree_s(sk, opt2, opt2->tot_len);
++	return ERR_PTR(err);
++}
++
++struct name_opt_hdr
++{
++	__u8 type;
++	__u8 len;
++	/* Followed by the actual name */
++};
++
++/* FIXME: Change name options to the "real" values once they're known.  Must
++ * <= 63.
++ */
++#define NAME_OPTION_SOURCE_NAME 17
++#define NAME_OPTION_DEST_NAME   18
++
++static void rfc1035_encode_name(char *dst, const char *name)
++{
++	const char *p = name;
++
++	while (p && *p)
++	{
++		const char *dot = strchr(p, '.');
++
++		if (dot)
++		{
++			unsigned char len = dot - p;
++
++			*dst = len;
++			memcpy(dst + 1, p, len);
++			dst += len + 1;
++			p = dot + 1;
++		}
++		else
++			p = NULL;
++	}
++	*dst = 0;
++}
++
++static int set_name_option(struct socket *sock, const char *name, __u8 opt_type)
++{
++	struct sock *sk = sock->sk;
++	struct ipv6_pinfo *np = inet6_sk(sk);
++	struct ipv6_txoptions *opt;
++	char *name_opt_buf;
++	struct ipv6_opt_hdr *opt_hdr;
++	struct name_opt_hdr *name_opt_hdr;
++	int err, name_opt_len;
++
++ 	if (np->opt && np->opt->dst1opt) {
++ 		name_opt_len = ipv6_optlen(np->opt->dst1opt);
++ 		name_opt_len += sizeof(struct name_opt_hdr) + strlen(name) + 1;
++ 		err = -ENOMEM;
++ 		name_opt_buf = kmalloc(name_opt_len, GFP_ATOMIC);
++ 		if (!name_opt_buf)
++ 			goto out;
++ 		memset(name_opt_buf, 0, name_opt_len);
++ 		memcpy(name_opt_buf, np->opt->dst1opt,
++ 		       ipv6_optlen(np->opt->dst1opt));
++ 
++ 		opt_hdr = (struct ipv6_opt_hdr *)name_opt_buf;
++ 		name_opt_hdr = (struct name_opt_hdr *)(opt_hdr + 1);
++ 		name_opt_hdr = (struct name_opt_hdr *)((char *)name_opt_hdr +
++ 			sizeof(struct name_opt_hdr) + name_opt_hdr->len);
++ 		name_opt_hdr->type = opt_type;
++ 		/* Happily the RFC1035-encoded name has the same length as the
++ 		 * C string.
++ 		 */
++ 		name_opt_hdr->len = strlen(name) + 1;
++ 		rfc1035_encode_name((char *)(name_opt_hdr + 1), name);
++ 		opt_hdr->nexthdr = 0;
++ 		opt_hdr->hdrlen = (name_opt_len + 1) >> 3;
++ 	}
++ 	else {
++ 		struct ipv6_opt_hdr tmp_opt_hdr;
++ 
++ 		/* Use to calculate the required length */
++ 		tmp_opt_hdr.nexthdr = 0;
++ 		/* FIXME: this is the reverse of ipv6_optlen, used to calculate
++ 		 * name_opt_len.  Are you sure it's correct?  Is there a nice
++ 		 * macro/calculation somewhere?
++ 		 */
++ 		tmp_opt_hdr.hdrlen =
++ 			(sizeof(struct name_opt_hdr) + strlen(name) + 1) >> 3;
++ 		name_opt_len = ipv6_optlen(&tmp_opt_hdr);
++ 		err = -ENOMEM;
++ 		name_opt_buf = kmalloc(name_opt_len, GFP_ATOMIC);
++ 		if (!name_opt_buf)
++ 			goto out;
++ 
++ 		memset(name_opt_buf, 0, name_opt_len);
++ 		opt_hdr = (struct ipv6_opt_hdr *)name_opt_buf;
++ 		name_opt_hdr = (struct name_opt_hdr *)(opt_hdr + 1);
++ 		name_opt_hdr->type = opt_type;
++ 		/* Happily the RFC1035-encoded name has the same length as the
++ 		 * C string.
++ 		 */
++ 		name_opt_hdr->len = strlen(name) + 1;
++ 		rfc1035_encode_name((char *)(name_opt_hdr + 1), name);
++ 		opt_hdr->nexthdr = 0;
++ 		opt_hdr->hdrlen =
++ 			(sizeof(struct name_opt_hdr) + name_opt_hdr->len) >> 3;
++ 	}
++	/* Rather than calling kernel_setsockopt, set the option directly to
++	 * avoid a permissions check on the calling process.
++	 */
++	opt = namestack_ipv6_renew_options(sk, np->opt, IPV6_DSTOPTS,
++				 (struct ipv6_opt_hdr *)name_opt_buf,
++				 name_opt_len);
++	if (IS_ERR(opt)) {
++		err = PTR_ERR(opt);
++		goto out;
++	}
++	err = 0;
++	opt = ipv6_update_options(sk, opt);
++	if (opt)
++		sock_kfree_s(sk, opt, opt->tot_len);
++out:
++	if (name_opt_buf)
++		kfree(name_opt_buf);
++	return err;
++}
++
+ static int name_create_v6_sock(int type, int protocol, struct socket **sock,
+ 			       struct name_stream_sock *name)
+ {
+@@ -458,7 +708,20 @@ static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
+ 	sin6.sin6_family = AF_INET6;
+ 	sin6.sin6_port = name->dname.sname_port;
+ 	memcpy(&sin6.sin6_addr, addr, sizeof(*addr));
+-	/* FIXME: need to set name options in socket */
++
++	if (name->sname.sname_addr.name[0]) {
++		err = set_name_option(name->ipv6_sock,
++				      name->sname.sname_addr.name,
++				      NAME_OPTION_SOURCE_NAME);
++		if (err)
++			goto out;
++	}
++
++	err = set_name_option(name->ipv6_sock, name->dname.sname_addr.name,
++			      NAME_OPTION_DEST_NAME);
++	if (err)
++		goto out;
++
+ 	err = kernel_connect(name->ipv6_sock, (struct sockaddr *)&sin6,
+ 			     sizeof(sin6), O_NONBLOCK);
+ 	/* The expected error is EINPROGRESS, as the socket connection kicks
+-- 
+1.6.3.2
+

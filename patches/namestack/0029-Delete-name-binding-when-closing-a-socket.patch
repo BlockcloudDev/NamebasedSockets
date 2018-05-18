@@ -1,0 +1,33 @@
+From 1cb879c8e6504b0cba83264fac54306de3f10666 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:47:35 -0700
+Subject: [PATCH] Delete name binding when closing a socket
+
+---
+ af_name.c |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index c048c93..d65c505 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -98,6 +98,8 @@ static int name_stream_release(struct socket *sock)
+ 		name->dname_answer_len = 0;
+ 		name->dname_answer_index = 0;
+ 	}
++	if (name->sname.sname_addr.name[0])
++		name_delete_registration(name->sname.sname_addr.name);
+ 	if (name->ipv6_sock) {
+ 		kernel_sock_shutdown(name->ipv6_sock, SHUT_WR);
+ 		sock_release(name->ipv6_sock);
+@@ -188,7 +190,6 @@ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 	 * also be included in the request.  Note that the request is
+ 	 * stateless:  if the addresses change, a new request can be sent, and
+ 	 * it should replace the current name registration.
+-	 * FIXME: the names should also be unregistered on close.
+ 	 */
+ 	err = name_send_registration(addr->sname_addr.name, name_bind_cb, sock);
+ 	if (err)
+-- 
+1.6.0.4
+

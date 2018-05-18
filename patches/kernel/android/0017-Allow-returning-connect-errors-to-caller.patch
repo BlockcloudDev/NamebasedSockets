@@ -1,0 +1,88 @@
+From 9975754a905f180f311b966cbea4a4f833e64829 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:45:08 -0700
+Subject: [PATCH 17/67] Allow returning connect errors to caller
+
+---
+ net/namestack/af_name.c |   22 +++++++++++++++-------
+ 1 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index b96d00d..a1c510b 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -16,6 +16,7 @@ struct name_stream_sock
+ 	u_char *dname_answer;
+ 	int dname_answer_len;
+ 	uint16_t dname_answer_index;
++	int connect_error;
+ };
+ 
+ static inline struct name_stream_sock *name_stream_sk(const struct sock *sk)
+@@ -160,14 +161,14 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+ 	uint16_t rdlength;
+ 	const u_char *rdata;
++	int err;
+ 
+ 	if (!find_answer_of_type(name->dname_answer, name->dname_answer_len,
+ 				 T_AAAA, name->dname_answer_index, &rdlength,
+ 				 &rdata)) {
+-		int ret = name_stream_connect_to_v6_address(sk, rdlength,
++		err = name_stream_connect_to_v6_address(sk, rdlength,
+ 							    rdata);
+-
+-		if (ret) {
++		if (err) {
+ 			/* FIXME: get next address rather than closing the
+ 			 * connection request.
+ 			 */
+@@ -179,10 +180,9 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 				      name->dname_answer_len,
+ 				      T_A, name->dname_answer_index, &rdlength,
+ 				      &rdata)) {
+-		int ret = name_stream_connect_to_v4_address(sk, rdlength,
++		err = name_stream_connect_to_v4_address(sk, rdlength,
+ 							    rdata);
+-
+-		if (ret) {
++		if (err) {
+ 			/* FIXME: get next address rather than closing the
+ 			 * connection request.
+ 			 */
+@@ -194,7 +194,9 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 		printk(KERN_WARNING "no supported address type found\n");
+ 		sk->sk_state = NAME_CLOSED;
+ 		sk->sk_state_change(sk);
++		err = -EHOSTUNREACH;
+ 	}
++	name->connect_error = err;
+ }
+ 
+ static void name_stream_query_resolve(const u_char *response, int len,
+@@ -295,8 +297,13 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 	}
+ 
+ 	if ((1 << sk->sk_state) & (NAMEF_CLOSED)) {
++		struct name_stream_sock *name = name_stream_sk(sk);
++
+ 		sock->state = SOCK_DEAD;
+-		err = -EHOSTUNREACH;
++		if (name->connect_error)
++			err = name->connect_error;
++		else
++			err = -EHOSTUNREACH;
+ 	}
+ 	else {
+ 		sock->state = SS_CONNECTED;
+@@ -357,6 +364,7 @@ static struct sock *name_alloc_stream_socket(struct net *net,
+ 	name->dname_answer = NULL;
+ 	name->dname_answer_len = 0;
+ 	name->dname_answer_index = 0;
++	name->connect_error = 0;
+ out:
+ 	return sk;
+ }
+-- 
+1.6.3.2
+

@@ -1,0 +1,125 @@
+From 12610572ec11770dec8833ad03d58511c4d8d115 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:48:09 -0700
+Subject: [PATCH 32/67] Don't qualify a name that's already fully-qualified
+
+---
+ net/namestack/af_name.c |   72 ++++++++++++++++++++++++++++++++---------------
+ 1 files changed, 49 insertions(+), 23 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index d7d56b5..e1c8580 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -141,9 +141,8 @@ static void name_register_cb(int result, const char *bound_name, void *data)
+ 		name_bind_to_fqdn(name, bound_name);
+ }
+ 
+-static void name_qualify_cb(const char *fully_qualified_name, void *data)
++static int name_register(struct socket *sock, const char *fully_qualified_name)
+ {
+-	struct socket *sock = data;
+ 	struct sock *sk = sock->sk;
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+ 	int err;
+@@ -158,6 +157,14 @@ static void name_qualify_cb(const char *fully_qualified_name, void *data)
+ 		sk->sk_state &= ~NAMEF_BINDING;
+ 		sk->sk_state_change(sk);
+ 	}
++	return err;
++}
++
++static void name_qualify_cb(const char *fully_qualified_name, void *data)
++{
++	struct socket *sock = data;
++
++	name_register(sock, fully_qualified_name);
+ }
+ 
+ static long name_wait_for_bind(struct sock *sk, long timeo)
+@@ -177,6 +184,45 @@ static long name_wait_for_bind(struct sock *sk, long timeo)
+ 	return timeo;
+ }
+ 
++static int name_qualify_and_register(struct sockaddr_name *addr,
++				     struct socket *sock)
++{
++	int err, len;
++	long timeo;
++	struct sock *sk;
++	struct name_stream_sock *name;
++
++	len = strlen(addr->sname_addr.name);
++	if (addr->sname_addr.name[len - 1] == '.') {
++		/* Name is already fully qualified, register it directly */
++		err = name_register(sock, addr->sname_addr.name);
++	}
++	else {
++		err = name_fully_qualify(addr->sname_addr.name,
++					 name_qualify_cb, sock);
++		if (err)
++			goto out;
++
++		sk = sock->sk;
++		name = name_stream_sk(sk);
++
++		timeo = sock_sndtimeo(sk, 0);
++		if ((1 << sk->sk_state) & NAMEF_BINDING) {
++			if (!timeo || !name_wait_for_bind(sk, timeo))
++				goto out;
++			err = sock_intr_errno(timeo);
++			if (signal_pending(current))
++				goto out;
++		}
++		if (name->async_error)
++			err = name->async_error;
++		else
++			err = 0;
++	}
++
++out:
++	return err;
++}
+ static int
+ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ {
+@@ -184,7 +230,6 @@ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 	struct sock *sk;
+ 	struct name_stream_sock *name;
+ 	int err;
+-	long timeo;
+ 
+ 	if (addr_len < sizeof(struct sockaddr_name))
+ 		return -EINVAL;
+@@ -212,27 +257,8 @@ name_stream_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 		goto out;
+ 	}
+ 
+-	/* FIXME: the address(es) to which the name should be bound should
+-	 * also be included in the request.  Note that the request is
+-	 * stateless:  if the addresses change, a new request can be sent, and
+-	 * it should replace the current name registration.
+-	 */
+-	err = name_fully_qualify(addr->sname_addr.name, name_qualify_cb, sock);
+-	if (err)
+-		goto out;
++	err = name_qualify_and_register(addr, sock);
+ 
+-	timeo = sock_sndtimeo(sk, 0);
+-	if ((1 << sk->sk_state) & NAMEF_BINDING) {
+-		if (!timeo || !name_wait_for_bind(sk, timeo))
+-			goto out;
+-		err = sock_intr_errno(timeo);
+-		if (signal_pending(current))
+-			goto out;
+-	}
+-	if (name->async_error)
+-		err = name->async_error;
+-	else
+-		err = 0;
+ out:
+ 	release_sock(sk);
+ 	return err;
+-- 
+1.6.3.2
+

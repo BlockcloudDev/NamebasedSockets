@@ -1,0 +1,48 @@
+From ad4c12bd14cb4b826fe7bb81a6d7c8128a84bf61 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:41:21 -0700
+Subject: [PATCH] Add dummy connect function that merely logs its input
+
+---
+ af_name.c |   20 +++++++++++++++++++-
+ 1 files changed, 19 insertions(+), 1 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 49a3008..4ded1e6 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -31,12 +31,30 @@ out:
+ 	return 0;
+ }
+ 
++static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
++			       int addr_len, int flags)
++{
++	struct sockaddr_name *sname = (struct sockaddr_name *)uaddr;
++	int err;
++
++	if (addr_len < sizeof(struct sockaddr_name))
++		return -EINVAL;
++	if (uaddr->sa_family != AF_NAME)
++		return -EAFNOSUPPORT;
++
++	printk(KERN_INFO "name_stream_connect requested to %s\n",
++	       sname->sname_addr.name);
++	err = -EINPROGRESS;
++
++	return err;
++}
++
+ static const struct proto_ops name_stream_ops = {
+ 	.family = PF_NAME,
+ 	.owner = THIS_MODULE,
+ 	.release = name_stream_release,
+ 	.bind = sock_no_bind,
+-	.connect = sock_no_connect,
++	.connect = name_stream_connect,
+ 	.socketpair = sock_no_socketpair,
+ 	.accept = sock_no_accept,
+ 	.getname = sock_no_getname,
+-- 
+1.6.0.4
+

@@ -1,0 +1,32 @@
+From 5f3b0fd983b0a0f8d3e82c70c1951a9a575eaccf Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Tue, 15 Sep 2009 17:44:01 -0700
+Subject: [PATCH 67/67] Fix a couple whitespace issues
+
+---
+ net/namestack/dns.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/net/namestack/dns.c b/net/namestack/dns.c
+index a3bbed9..ae1f177 100644
+--- a/net/namestack/dns.c
++++ b/net/namestack/dns.c
+@@ -121,13 +121,13 @@ int find_answer_of_type(const u_char *ptr, uint16_t len, uint16_t t,
+ 			overrun = 1;
+ 			goto out;
+ 		}
+-				ptr += sizeof(uint16_t);
++		ptr += sizeof(uint16_t);
+ 		if (ptr - original_ptr + sizeof(uint16_t) > len)
+ 		{
+ 			overrun = 1;
+ 			goto out;
+ 		}
+-				ptr += sizeof(uint16_t);
++		ptr += sizeof(uint16_t);
+ 	}
+ 	/* Walk through answers, looking for nth instance of type t */
+ 	for (i = 0, matching_answers = 0; i < ancount; i++)
+-- 
+1.6.3.2
+

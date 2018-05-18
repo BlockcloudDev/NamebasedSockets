@@ -1,0 +1,98 @@
+From 8ece1430563bcda1c5ed666af6c1cc5286aa0414 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:40:53 -0700
+Subject: [PATCH 05/67] Initialize the protocol family in the module load routine
+
+---
+ net/namestack/Makefile         |    4 ++--
+ net/namestack/af_name.c        |    5 +++--
+ net/namestack/main.c           |    6 +++++-
+ net/namestack/namestack_priv.h |    6 ++++++
+ 4 files changed, 16 insertions(+), 5 deletions(-)
+ create mode 100644 net/namestack/namestack_priv.h
+
+diff --git a/net/namestack/Makefile b/net/namestack/Makefile
+index 2a9870b..619d04a 100644
+--- a/net/namestack/Makefile
++++ b/net/namestack/Makefile
+@@ -1,5 +1,5 @@
+-obj-m += namestack.o af_name.o
+-namestack-objs := main.o
++obj-m += namestack.o
++namestack-objs := main.o af_name.o
+ 
+ # ordinary compiles:
+ #KERN_BUILD := /lib/modules/$(shell uname -r)/build
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 9798832..4ff4f34 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -4,6 +4,7 @@
+ #include <linux/module.h>
+ #include <net/sock.h>
+ #include <linux/inname.h>
++#include "namestack_priv.h"
+ 
+ struct name_sock
+ {
+@@ -179,7 +180,7 @@ static struct net_proto_family name_family_ops = {
+ 	.owner = THIS_MODULE,
+ };
+ 
+-static int __init name_init(void)
++int name_af_init(void)
+ {
+ 	int rc;
+ 
+@@ -196,4 +197,4 @@ out:
+ 	return rc;
+ }
+ 
+-fs_initcall(name_init);
++EXPORT_SYMBOL(name_af_init);
+diff --git a/net/namestack/main.c b/net/namestack/main.c
+index 4bf73f2..22f43b8 100644
+--- a/net/namestack/main.c
++++ b/net/namestack/main.c
+@@ -4,6 +4,7 @@
+ #include <linux/netlink.h>
+ #include <net/net_namespace.h>
+ #include "namestacknl.h"
++#include "namestack_priv.h"
+ 
+ static DEFINE_MUTEX(nos_mutex);
+ static struct sock *nls = NULL;
+@@ -95,6 +96,8 @@ nos_rcv_skb(struct sk_buff *skb)
+ 
+ static __init int namestack_init(void)
+ {
++	int rc;
++
+ 	printk(KERN_INFO "name-oriented stack module loading\n");
+ 
+ 	nls = netlink_kernel_create(&init_net, NETLINK_NAME_ORIENTED_STACK,
+@@ -103,7 +106,8 @@ static __init int namestack_init(void)
+ 		printk(KERN_ERR "namestackmod: failed to create netlink socket\n");
+ 		return -ENOMEM;
+ 	}
+-	return 0;
++	rc = name_af_init();
++	return rc;
+ }
+ 
+ static void __exit namestack_exit(void)
+diff --git a/net/namestack/namestack_priv.h b/net/namestack/namestack_priv.h
+new file mode 100644
+index 0000000..856d8ce
+--- /dev/null
++++ b/net/namestack/namestack_priv.h
+@@ -0,0 +1,6 @@
++#ifndef NAMESTACK_PRIV_H
++#define NAMESTACK_PRIV_H
++
++extern int name_af_init(void);
++
++#endif /* NAMESTACK_PRIV_H */
+-- 
+1.6.3.2
+

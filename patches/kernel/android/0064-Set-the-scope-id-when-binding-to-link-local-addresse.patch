@@ -1,0 +1,93 @@
+From 8a532006f3518255861d38963e354929b1fb6678 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 14:15:05 -0700
+Subject: [PATCH 64/67] Set the scope id when binding to link-local addresses
+
+---
+ net/namestack/address.c        |   28 ++++++++++++++++++++++++++++
+ net/namestack/af_name.c        |   14 +++++++++++++-
+ net/namestack/namestack_priv.h |    6 ++++++
+ 3 files changed, 47 insertions(+), 1 deletions(-)
+
+diff --git a/net/namestack/address.c b/net/namestack/address.c
+index c49eeeb..3691bed 100644
+--- a/net/namestack/address.c
++++ b/net/namestack/address.c
+@@ -157,3 +157,31 @@ int choose_addresses(int *num_v6_addresses, struct in6_addr **v6_addresses,
+ out:
+ 	return err;
+ }
++
++int match_v6_address_to_scope(struct sockaddr_in6 *sin6)
++{
++	struct net *net = &init_net;
++	struct net_device *dev;
++
++	/* FIXME: lock net? */
++	for_each_netdev(net, dev) {
++		if (!(dev->flags & IFF_UP))
++			continue;
++		if (dev->flags & IFF_LOOPBACK)
++			continue;
++		if (dev->ip6_ptr) {
++			struct inet6_dev *in6 = dev->ip6_ptr;
++			struct inet6_ifaddr *addr;
++
++			for (addr = in6->addr_list; addr; addr = addr->if_next)
++				if (!memcmp(&addr->addr,
++				    sin6->sin6_addr.s6_addr,
++				    sizeof(addr->addr)))
++				{
++					sin6->sin6_scope_id = dev->ifindex;
++					return 0;
++				}
++		}
++	}
++	return -ENODEV;
++}
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 77392b0..1a0e323 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -732,8 +732,20 @@ static int name_bind_to_fqdn(struct name_stream_sock *name, const char *fqdn,
+ 				goto out;
+ 		}
+ 		memset(&sin, 0, sizeof(sin));
+-		if (v6addr)
++		if (v6addr) {
+ 			memcpy(&sin.sin6_addr, v6addr, sizeof(sin.sin6_addr));
++			/* If it's a link-local address, match the address to
++			 * a scope id that defines the interface on which it'll
++			 * be used.
++			 */
++			if (sin.sin6_addr.s6_addr[0] == 0xfe &&
++			    sin.sin6_addr.s6_addr[1] == 0x80)
++			{
++				err = match_v6_address_to_scope(&sin);
++				if (err)
++					goto out;
++			}
++		}
+ 		sin.sin6_port = name->sname.sname_port;
+ 		err = kernel_bind(name->ipv6_sock, (struct sockaddr *)&sin,
+ 				  sizeof(sin));
+diff --git a/net/namestack/namestack_priv.h b/net/namestack/namestack_priv.h
+index f72c651..96cba50 100644
+--- a/net/namestack/namestack_priv.h
++++ b/net/namestack/namestack_priv.h
+@@ -48,6 +48,12 @@ struct in_ifaddr;
+ int choose_addresses(int *num_v6_addresses, struct in6_addr **v6_addresses,
+ 		     int *num_v4_addresses, __be32 **v4_addresses);
+ 
++/* Matches the sin6_addr portion of the address to a scope id on the local
++ * host, and sets sin6's scope id to the matching scope id.
++ * Returns 0 if found, an error code on failure.
++ */
++int match_v6_address_to_scope(struct sockaddr_in6 *sin6);
++
+ /* Name registration (bind()/DNS update) functions */
+ typedef void (*qualify_cb)(const char *name, void *data);
+ int name_fully_qualify(const char *name, qualify_cb cb, void *data);
+-- 
+1.6.3.2
+

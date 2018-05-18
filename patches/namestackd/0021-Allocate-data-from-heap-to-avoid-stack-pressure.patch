@@ -1,0 +1,57 @@
+From 1da8c0dfa5e10914cf324d07153c7d7dfb1610d4 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:35:35 -0700
+Subject: [PATCH 21/21] Allocate data from heap to avoid stack pressure
+
+---
+ daemon.c |   15 +++++++++++----
+ 1 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/daemon.c b/daemon.c
+index 59ece25..9d0e390 100644
+--- a/daemon.c
++++ b/daemon.c
+@@ -130,14 +130,20 @@ struct query_data
+ static void *query_thread(void *arg)
+ {
+ 	struct query_data *data = arg;
+-	u_char buf[PACKETSZ];
+-	int len, msg_len, found_response = 0;
++	u_char *buf;
++	int len, buflen, msg_len, found_response = 0;
+ 	struct nlmsghdr *nlh = NULL;
+ 	uint16_t rdlength;
+ 	const u_char *rdata;
+ 
+ 	LOGI("querying %s (seq %d)\n", data->name, data->seq);
+-	len = res_query(data->name, C_IN, T_AAAA, buf, sizeof(buf));
++
++	if (!(buf = malloc(PACKETSZ))) {
++		/* OOM */
++		return NULL;
++	}
++	buflen = PACKETSZ;
++	len = res_query(data->name, C_IN, T_AAAA, buf, buflen);
+ 	if (len >= 0)
+ 	{
+ 		found_response = !find_answer_of_type(buf, len, T_AAAA, 0,
+@@ -152,7 +158,7 @@ static void *query_thread(void *arg)
+ 	}
+ 	if (!found_response)
+ 	{
+-		len = res_query(data->name, C_IN, T_A, buf, sizeof(buf));
++		len = res_query(data->name, C_IN, T_A, buf, buflen);
+ 		if (len >= 0)
+ 		{
+ 			found_response = !find_answer_of_type(buf, len, T_A, 0,
+@@ -206,6 +212,7 @@ static void *query_thread(void *arg)
+ 		free(nlh);
+ 	}
+ 	free(data);
++	free(buf);
+ }
+ 
+ static void do_query(unsigned int seq, const char *data, size_t len)
+-- 
+1.6.3.2
+

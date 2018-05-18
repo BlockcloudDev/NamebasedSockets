@@ -1,0 +1,142 @@
+From 8b9f37b622934ac3877d29f4de243b5db99f8421 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:40:35 -0700
+Subject: [PATCH 04/67] Set the sock's proto_ops when creating a PF_NAME socket
+
+---
+ net/namestack/af_name.c |   89 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 89 insertions(+), 0 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 28f4cff..9798832 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -12,12 +12,96 @@ struct name_sock
+ 	struct name_addr dname;
+ };
+ 
++static int name_stream_release(struct socket *sock)
++{
++	struct sock *sk = sock->sk;
++
++	if (!sk)
++		goto out;
++
++	if (!sock_flag(sk, SOCK_DEAD))
++		sk->sk_state_change(sk);
++
++	sock_set_flag(sk, SOCK_DEAD);
++	sock->sk = NULL;
++	sk_refcnt_debug_release(sk);
++	sock_put(sk);
++out:
++	return 0;
++}
++
++static const struct proto_ops name_stream_ops = {
++	.family = PF_NAME,
++	.owner = THIS_MODULE,
++	.release = name_stream_release,
++	.bind = sock_no_bind,
++	.connect = sock_no_connect,
++	.socketpair = sock_no_socketpair,
++	.accept = sock_no_accept,
++	.getname = sock_no_getname,
++	.poll = sock_no_poll,
++	.ioctl = sock_no_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl = sock_no_compat_ioctl,
++#endif
++	.listen = sock_no_listen,
++	.shutdown = sock_no_shutdown,
++	.setsockopt = sock_no_setsockopt,
++	.getsockopt = sock_no_getsockopt,
++	.sendmsg = sock_no_sendmsg,
++	.recvmsg = sock_no_recvmsg,
++	.mmap = sock_no_mmap,
++	.sendpage = sock_no_sendpage,
++};
++
+ static struct proto name_stream_proto = {
+ 	.name = "NAME_STREAM",
+ 	.owner = THIS_MODULE,
+ 	.obj_size = sizeof(struct name_sock),
+ };
+ 
++static int name_dgram_release(struct socket *sock)
++{
++	struct sock *sk = sock->sk;
++
++	if (!sk)
++		goto out;
++
++	if (!sock_flag(sk, SOCK_DEAD))
++		sk->sk_state_change(sk);
++
++	sock_set_flag(sk, SOCK_DEAD);
++	sock->sk = NULL;
++	sk_refcnt_debug_release(sk);
++	sock_put(sk);
++out:
++	return 0;
++}
++
++static const struct proto_ops name_dgram_ops = {
++	.family = PF_NAME,
++	.owner = THIS_MODULE,
++	.release = name_dgram_release,
++	.bind = sock_no_bind,
++	.connect = sock_no_connect,
++	.socketpair = sock_no_socketpair,
++	.accept = sock_no_accept,
++	.getname = sock_no_getname,
++	.poll = sock_no_poll,
++	.ioctl = sock_no_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl = sock_no_compat_ioctl,
++#endif
++	.listen = sock_no_listen,
++	.shutdown = sock_no_shutdown,
++	.setsockopt = sock_no_setsockopt,
++	.getsockopt = sock_no_getsockopt,
++	.sendmsg = sock_no_sendmsg,
++	.recvmsg = sock_no_recvmsg,
++	.mmap = sock_no_mmap,
++	.sendpage = sock_no_sendpage,
++};
++
+ static struct proto name_dgram_proto = {
+ 	.name = "NAME_DGRAM",
+ 	.owner = THIS_MODULE,
+@@ -51,6 +135,7 @@ static int name_create(struct net *net, struct socket *sock, int protocol)
+ 	struct sock *sk;
+ 	struct name_sock *name;
+ 	struct proto *proto;
++	const struct proto_ops *proto_ops;
+ 	int rc;
+ 
+ 	if (net != &init_net)
+@@ -61,9 +146,11 @@ static int name_create(struct net *net, struct socket *sock, int protocol)
+ 	{
+ 	case SOCK_STREAM:
+ 		proto = &name_stream_proto;
++		proto_ops = &name_stream_ops;
+ 		break;
+ 	case SOCK_DGRAM:
+ 		proto = &name_dgram_proto;
++		proto_ops = &name_dgram_ops;
+ 		break;
+ 	default:
+ 		rc = -EPROTONOSUPPORT;
+@@ -71,6 +158,8 @@ static int name_create(struct net *net, struct socket *sock, int protocol)
+ 	if (rc)
+ 		goto out;
+ 
++	sock->ops = proto_ops;
++
+ 	rc = -ENOMEM;
+ 	if (!(sk = name_alloc_socket(net, proto)))
+ 		goto out;
+-- 
+1.6.3.2
+

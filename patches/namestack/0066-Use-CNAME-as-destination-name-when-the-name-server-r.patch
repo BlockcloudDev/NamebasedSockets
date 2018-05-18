@@ -1,0 +1,52 @@
+From 95aee2e52fe3b3405fa66d3437f919f8ca243920 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Tue, 15 Sep 2009 17:23:34 -0700
+Subject: [PATCH] Use CNAME as destination name when the name server response contains one
+
+---
+ af_name.c |   13 +++++++++++++
+ nameser.h |    5 +++--
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index dd12d87..1b15b9f 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -1239,6 +1239,19 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 	int err;
+ 
+ 	if (!find_answer_of_type(name->dname_answer, name->dname_answer_len,
++				 T_CNAME, 0, &rdlength, &rdata)) {
++		char *fqdn = rfc1035_decode_name(rdata, rdlength);
++
++		/* The response contains a CNAME.  Use this as the destination
++		 * name, rather than name the application provided.
++		 */
++		if (fqdn) {
++			printk(KERN_INFO "connecting to %s\n", fqdn);
++			strcpy(name->dname.sname_addr.name, fqdn);
++			kfree(fqdn);
++		}
++	}
++	if (!find_answer_of_type(name->dname_answer, name->dname_answer_len,
+ 				 T_AAAA, name->dname_answer_index, &rdlength,
+ 				 &rdata)) {
+ 		err = name_stream_connect_to_v6_address(sk, rdlength,
+diff --git a/nameser.h b/nameser.h
+index f6d0843..c6d672d 100644
+--- a/nameser.h
++++ b/nameser.h
+@@ -78,7 +78,8 @@ typedef struct {
+ 	unsigned	arcount :16;	/*%< number of resource entries */
+ } HEADER;
+ 
+-#define T_A     1
+-#define T_AAAA 28
++#define T_A      1
++#define T_CNAME  5
++#define T_AAAA  28
+ 
+ #endif /* __NAMESER_H__ */
+-- 
+1.6.0.4
+

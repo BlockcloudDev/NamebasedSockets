@@ -1,0 +1,115 @@
+From 3d38340f8079970e548d6dcff1de611e248613ce Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 17 Sep 2009 15:31:25 -0700
+Subject: [PATCH 06/21] Handle addresses in registration message
+
+---
+ main.c |   66 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 65 insertions(+), 1 deletions(-)
+
+diff --git a/main.c b/main.c
+index aec601c..4184dad 100644
+--- a/main.c
++++ b/main.c
+@@ -296,16 +296,32 @@ struct register_data
+ {
+ 	unsigned int seq;
+ 	char name[MAX_NAME_LEN];
++	int num_v6_addresses;
++	struct in6_addr *v6_addresses;
++	int num_v4_addresses;
++	struct in_addr *v4_addresses;
+ };
+ 
+ static void *register_thread(void *arg)
+ {
+ 	struct register_data *data = arg;
+-	int len, msg_len, name_len, err;
++	int len, msg_len, name_len, err, i;
+ 	struct nlmsghdr *nlh = NULL;
+ 	char registered_name[MAX_NAME_LEN];
+ 
+ 	printf("registering %s (seq %d)\n", data->name, data->seq);
++	printf("%d IPv6 addresses:\n", data->num_v6_addresses);
++	for (i = 0; i < data->num_v6_addresses; i++)
++		print_aaaa((const u_char *)&data->v6_addresses[i],
++			   sizeof(data->v6_addresses[i]),
++			   (const u_char *)data->v6_addresses,
++			   data->num_v6_addresses * sizeof(data->v6_addresses[i]));
++	printf("%d IPv4 addresses:\n", data->num_v4_addresses);
++	for (i = 0; i < data->num_v4_addresses; i++)
++		print_a((const u_char *)&data->v4_addresses[i],
++			sizeof(data->v4_addresses[i]),
++			(const u_char *)data->v4_addresses,
++			data->num_v4_addresses * sizeof(data->v4_addresses[i]));
+ 	res_init();
+ 	len = strlen(data->name);
+ 	/* len is guaranteed to be <= MAX_NAME_LEN, see do_register */
+@@ -387,6 +403,10 @@ static void *register_thread(void *arg)
+ 
+ 		free(nlh);
+ 	}
++	if (data->v6_addresses)
++		free(data->v6_addresses);
++	if (data->v4_addresses)
++		free(data->v4_addresses);
+ 	free(data);
+ }
+ 
+@@ -410,9 +430,53 @@ static void do_register(unsigned int seq, const char *data, size_t len)
+ 			if (qdata)
+ 			{
+ 				pthread_t thread_id;
++				const char *ptr;
+ 
+ 				qdata->seq = seq;
+ 				memcpy(qdata->name, data, measured_len + 1);
++				ptr = data + measured_len + 1;
++				memcpy(&qdata->num_v6_addresses, ptr,
++				       sizeof(int));
++				ptr += sizeof(int);
++				if (qdata->num_v6_addresses) {
++					qdata->v6_addresses = malloc(
++ 						qdata->num_v6_addresses *
++ 						sizeof(struct in6_addr));
++ 					if (!qdata->v6_addresses) {
++ 						free(qdata);
++ 						fprintf(stderr,
++ 							"memory allocation failure, can't register name\n");
++ 						goto nak;
++ 					}
++ 					memcpy(qdata->v6_addresses, ptr,
++ 					       qdata->num_v6_addresses *
++ 					       sizeof(struct in6_addr));
++ 					ptr += qdata->num_v6_addresses *
++ 						sizeof(struct in6_addr);
++ 				}
++ 				else
++ 					qdata->v6_addresses = NULL;
++ 				memcpy(&qdata->num_v4_addresses, ptr,
++ 				       sizeof(int));
++ 				ptr += sizeof(int);
++ 				if (qdata->num_v4_addresses) {
++ 					qdata->v4_addresses = malloc(
++ 						qdata->num_v4_addresses *
++ 						sizeof(struct in_addr));
++ 					if (!qdata->v4_addresses) {
++ 						if (qdata->v6_addresses)
++ 							free(qdata->v6_addresses);
++ 						free(qdata);
++ 						fprintf(stderr,
++ 							"memory allocation failure, can't register name\n");
++ 						goto nak;
++ 					}
++ 					memcpy(qdata->v4_addresses, ptr,
++ 					       qdata->num_v4_addresses *
++ 						sizeof(struct in_addr));
++ 				}
++ 				else
++ 					qdata->v4_addresses = NULL;
+ 				if (pthread_create(&thread_id, NULL,
+ 				    register_thread, qdata))
+ 				{
+-- 
+1.6.3.2
+

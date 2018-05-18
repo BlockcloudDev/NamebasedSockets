@@ -1,0 +1,73 @@
+From 7932dc4315236b47352c2ef75c2a64ee90889f6a Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:49:04 -0700
+Subject: [PATCH] Bind to requested port
+
+---
+ af_name.c |   21 +++++++++++++++------
+ 1 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/af_name.c b/af_name.c
+index 34c5434..320021f 100644
+--- a/af_name.c
++++ b/af_name.c
+@@ -156,7 +156,8 @@ static void name_register_cb(int result, const char *bound_name, void *data)
+ 	name->async_error = -result;
+ }
+ 
+-static int name_register(struct socket *sock, const char *fully_qualified_name)
++static int name_register(struct socket *sock, const char *fully_qualified_name,
++			__be16 port)
+ {
+ 	struct sock *sk = sock->sk;
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+@@ -165,6 +166,7 @@ static int name_register(struct socket *sock, const char *fully_qualified_name)
+ 
+ 	printk(KERN_INFO "name qualified as %s\n", fully_qualified_name);
+ 	strcpy(name->sname.sname_addr.name, fully_qualified_name);
++	name->sname.sname_port = port;
+ 	err = name_cache_add(fully_qualified_name, sock);
+ 	if (err)
+ 		goto out;
+@@ -202,8 +204,10 @@ out:
+ static void name_qualify_cb(const char *fully_qualified_name, void *data)
+ {
+ 	struct socket *sock = data;
++	struct sock *sk = sock->sk;
++	struct name_stream_sock *name = name_stream_sk(sk);
+ 
+-	name_register(sock, fully_qualified_name);
++	name_register(sock, fully_qualified_name, name->sname.sname_port);
+ }
+ 
+ static long name_wait_for_bind(struct sock *sk, long timeo)
+@@ -234,17 +238,22 @@ static int name_qualify_and_register(struct sockaddr_name *addr,
+ 	len = strlen(addr->sname_addr.name);
+ 	if (addr->sname_addr.name[len - 1] == '.') {
+ 		/* Name is already fully qualified, register it directly */
+-		err = name_register(sock, addr->sname_addr.name);
++		err = name_register(sock, addr->sname_addr.name,
++				    addr->sname_port);
+ 	}
+ 	else {
++		sk = sock->sk;
++		name = name_stream_sk(sk);
++
++		/* Copy the port to the socket's source name, it'll be used
++		 * in name_qualify_cb.
++		 */
++		name->sname.sname_port = addr->sname_port;
+ 		err = name_fully_qualify(addr->sname_addr.name,
+ 					 name_qualify_cb, sock);
+ 		if (err)
+ 			goto out;
+ 
+-		sk = sock->sk;
+-		name = name_stream_sk(sk);
+-
+ 		timeo = sock_sndtimeo(sk, 0);
+ 		if ((1 << sk->sk_state) & NAMEF_BINDING) {
+ 			if (!timeo || !name_wait_for_bind(sk, timeo))
+-- 
+1.6.0.4
+

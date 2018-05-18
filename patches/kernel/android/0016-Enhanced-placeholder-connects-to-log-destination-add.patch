@@ -1,0 +1,162 @@
+From 002ffd25c78fab2e22c1225f2302aa3946451c20 Mon Sep 17 00:00:00 2001
+From: Juan Lang <juan.lang@ericsson.com>
+Date: Thu, 10 Sep 2009 13:44:57 -0700
+Subject: [PATCH 16/67] Enhanced placeholder connects to log destination address
+
+---
+ net/namestack/af_name.c |  104 ++++++++++++++++++++++++++++++++++++++++++++---
+ 1 files changed, 98 insertions(+), 6 deletions(-)
+
+diff --git a/net/namestack/af_name.c b/net/namestack/af_name.c
+index 47176c9..b96d00d 100644
+--- a/net/namestack/af_name.c
++++ b/net/namestack/af_name.c
+@@ -82,6 +82,79 @@ static long name_wait_for_connect(struct sock *sk, long timeo)
+ 	return timeo;
+ }
+ 
++static int name_stream_connect_to_v6_address(struct sock *sk, uint16_t rdlength,
++					     const u_char *rdata)
++{
++	struct name_stream_sock *name = name_stream_sk(sk);
++	struct in6_addr *addr;
++	char address[46], *p;
++	int i, in_zero = 0;
++
++	if (rdlength != sizeof(struct in6_addr)) {
++		printk(KERN_WARNING
++		       "address record %d has invalid length %d\n",
++		       name->dname_answer_index, rdlength);
++		return -EHOSTUNREACH;
++	}
++	addr = (struct in6_addr *)rdata;
++	p = address;
++	for (i = 0; i < 7; i++)
++	{
++		if (!addr->s6_addr16[i])
++		{
++			if (!in_zero)
++			{
++				*p++ = ':';
++				in_zero = 1;
++			}
++		}
++		else
++		{
++			int n;
++
++			sprintf(p, "%x:%n", ntohs(addr->s6_addr16[i]), &n);
++			p += n;
++			in_zero = 0;
++		}
++	}
++	sprintf(p, "%x", ntohs(addr->s6_addr16[7]));
++	printk(KERN_INFO "connect to IPv6 address %s\n", address);
++	/* FIXME: placeholder */
++	return 0;
++}
++
++static int name_stream_connect_to_v4_address(struct sock *sk, uint16_t rdlength,
++					     const u_char *rdata)
++{
++	struct name_stream_sock *name = name_stream_sk(sk);
++	uint32_t addr;
++	char address[16], *p;
++	const u_char *addrp;
++
++	if (rdlength != sizeof(uint32_t)) {
++		printk(KERN_WARNING
++		       "address record %d has invalid length %d\n",
++		       name->dname_answer_index, rdlength);
++		return -EHOSTUNREACH;
++	}
++	addr = *(uint32_t *)rdata;
++	p = address;
++	for (addrp = (u_char *)&addr;
++	     addrp - (u_char *)&addr < sizeof(uint32_t);
++	     addrp++)
++	{
++		int n;
++
++		sprintf(p, "%d%n\n", *addrp, &n);
++		p += n;
++		if (addrp < (u_char *)&addr + sizeof(uint32_t) - 1)
++			*p++ = '.';
++	}
++	printk(KERN_INFO "connect to IPv4 address %s\n", address);
++	/* FIXME: placeholder */
++	return 0;
++}
++
+ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ {
+ 	struct name_stream_sock *name = name_stream_sk(sk);
+@@ -91,15 +164,31 @@ static void name_stream_connect_to_resolved_name(struct sock *sk)
+ 	if (!find_answer_of_type(name->dname_answer, name->dname_answer_len,
+ 				 T_AAAA, name->dname_answer_index, &rdlength,
+ 				 &rdata)) {
+-		/* FIXME: placeholder */
+-		printk(KERN_INFO "connect to IPv6 address\n");
++		int ret = name_stream_connect_to_v6_address(sk, rdlength,
++							    rdata);
++
++		if (ret) {
++			/* FIXME: get next address rather than closing the
++			 * connection request.
++			 */
++			sk->sk_state = NAME_CLOSED;
++			sk->sk_state_change(sk);
++		}
+ 	}
+ 	else if (!find_answer_of_type(name->dname_answer,
+ 				      name->dname_answer_len,
+ 				      T_A, name->dname_answer_index, &rdlength,
+ 				      &rdata)) {
+-		/* FIXME: placeholder */
+-		printk(KERN_INFO "connect to IPv4 address\n");
++		int ret = name_stream_connect_to_v4_address(sk, rdlength,
++							    rdata);
++
++		if (ret) {
++			/* FIXME: get next address rather than closing the
++			 * connection request.
++			 */
++			sk->sk_state = NAME_CLOSED;
++			sk->sk_state_change(sk);
++		}
+ 	}
+ 	else {
+ 		printk(KERN_WARNING "no supported address type found\n");
+@@ -149,6 +238,7 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 	struct sockaddr_name *sname = (struct sockaddr_name *)uaddr;
+ 	int err;
+ 	struct sock *sk;
++	struct name_stream_sock *name;
+ 	long timeo;
+ 
+ 	if (addr_len < sizeof(struct sockaddr_name))
+@@ -156,10 +246,11 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 	if (uaddr->sa_family != AF_NAME)
+ 		return -EAFNOSUPPORT;
+ 
+-	printk(KERN_INFO "name_stream_connect requested to %s\n",
+-	       sname->sname_addr.name);
++	printk(KERN_INFO "name_stream_connect requested to %s:%d\n",
++	       sname->sname_addr.name, ntohs(sname->sname_port));
+ 
+ 	sk = sock->sk;
++	name = name_stream_sk(sk);
+ 	lock_sock(sk);
+ 
+ 	switch (sock->state) {
+@@ -178,6 +269,7 @@ static int name_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 
+ 		sock->state = SS_CONNECTING;
+ 		sk->sk_state = NAME_RESOLVING;
++		memcpy(&name->dname, uaddr, addr_len);
+ 		err = name_send_query(sname->sname_addr.name,
+ 				      name_stream_query_resolve, sock);
+ 		if (err)
+-- 
+1.6.3.2
+
